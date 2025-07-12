@@ -437,7 +437,7 @@ async function monitorAds(client) {
                             { name: 'Offered', value: ad.offerItems.map(i => i.name).join(', ') || 'None', inline: false },
                             { name: 'Requested', value: ad.requestItems.map(i => i.name).join(', ') || 'None', inline: false }
                         )
-                        .setFooter({ text: 'Rolimon\'s Trade Monitor' })
+                        .setFooter({ text: '@https://discord.gg/M4wjRvywHH' })
                         .setTimestamp();
                     if (ad.userImg && ad.userImg.startsWith('http')) {
                         embed.setThumbnail(ad.userImg);
@@ -470,7 +470,7 @@ async function monitorAds(client) {
                                         { name: 'RAP Difference', value: ad.rapDiff !== null ? (ad.rapDiff > 0 ? '+' : '') + ad.rapDiff.toLocaleString() : 'N/A', inline: true },
                                         { name: 'Channel', value: `<#${channel_id}>`, inline: false }
                                     )
-                                    .setFooter({ text: 'DM Forwarding - Rolimon\'s Trade Monitor' })
+                                    .setFooter({ text: 'DM Forwarding - @https://discord.gg/M4wjRvywHH' })
                                     .setTimestamp();
 
                                 const dmMessage = {
