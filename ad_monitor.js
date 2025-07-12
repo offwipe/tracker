@@ -174,8 +174,10 @@ async function fetchAllRequestAds(itemId) {
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
         await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
         await page.waitForSelector('.mix_item', { timeout: 10000 });
-        // Try to click or remove cookie/privacy popups
-        await page.evaluate(() => {
+        
+        // Wait for images to load and handle lazy loading
+        await page.evaluate(async () => {
+            // Remove cookie/privacy popups first
             const btns = Array.from(document.querySelectorAll('button, [role="button"]'));
             btns.forEach(btn => {
                 if (/accept|close|agree|dismiss|consent/i.test(btn.textContent)) btn.click();
@@ -185,7 +187,35 @@ async function fetchAllRequestAds(itemId) {
             Array.from(document.querySelectorAll('div, span, p')).forEach(el => {
                 if (/privacy|cookie/i.test(el.textContent)) el.remove();
             });
+            
+            // Force load all lazy-loaded images
+            const lazyImages = document.querySelectorAll('img[data-src]');
+            for (const img of lazyImages) {
+                if (img.dataset.src && !img.dataset.src.includes('transparent-square') && !img.dataset.src.includes('empty_trade_slot')) {
+                    img.src = img.dataset.src;
+                    img.classList.remove('lazyload');
+                    img.classList.add('lazyloaded');
+                }
+            }
+            
+            // Wait for images to load
+            const imagePromises = Array.from(lazyImages).map(img => {
+                return new Promise((resolve) => {
+                    if (img.complete) {
+                        resolve();
+                    } else {
+                        img.onload = () => resolve();
+                        img.onerror = () => resolve(); // Don't fail if image fails to load
+                    }
+                });
+            });
+            
+            await Promise.all(imagePromises);
+            
+            // Additional wait for any remaining lazy loading
+            await new Promise(resolve => setTimeout(resolve, 2000));
         });
+        
         html = await page.content();
     } catch (err) {
         console.error(`[AdMonitor][Puppeteer] Error loading page for item ${itemId}:`, err);
@@ -234,8 +264,10 @@ async function getTradeAdScreenshot(itemId, adElemIndex) {
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
         await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
         await page.waitForSelector('.mix_item', { timeout: 10000 });
-        // Try to click or remove cookie/privacy popups
-        await page.evaluate(() => {
+        
+        // Wait for images to load and handle lazy loading
+        await page.evaluate(async () => {
+            // Remove cookie/privacy popups first
             const btns = Array.from(document.querySelectorAll('button, [role="button"]'));
             btns.forEach(btn => {
                 if (/accept|close|agree|dismiss|consent/i.test(btn.textContent)) btn.click();
@@ -245,7 +277,35 @@ async function getTradeAdScreenshot(itemId, adElemIndex) {
             Array.from(document.querySelectorAll('div, span, p')).forEach(el => {
                 if (/privacy|cookie/i.test(el.textContent)) el.remove();
             });
+            
+            // Force load all lazy-loaded images
+            const lazyImages = document.querySelectorAll('img[data-src]');
+            for (const img of lazyImages) {
+                if (img.dataset.src && !img.dataset.src.includes('transparent-square') && !img.dataset.src.includes('empty_trade_slot')) {
+                    img.src = img.dataset.src;
+                    img.classList.remove('lazyload');
+                    img.classList.add('lazyloaded');
+                }
+            }
+            
+            // Wait for images to load
+            const imagePromises = Array.from(lazyImages).map(img => {
+                return new Promise((resolve) => {
+                    if (img.complete) {
+                        resolve();
+                    } else {
+                        img.onload = () => resolve();
+                        img.onerror = () => resolve(); // Don't fail if image fails to load
+                    }
+                });
+            });
+            
+            await Promise.all(imagePromises);
+            
+            // Additional wait for any remaining lazy loading
+            await new Promise(resolve => setTimeout(resolve, 2000));
         });
+        
         const adHandles = await page.$$('.mix_item');
         if (adHandles[adElemIndex]) {
             buffer = await adHandles[adElemIndex].screenshot({ encoding: 'binary', type: 'png' });
@@ -382,18 +442,55 @@ async function monitorAds(client) {
                     if (ad.userImg && ad.userImg.startsWith('http')) {
                         embed.setThumbnail(ad.userImg);
                     }
+
+                    // Send to channel
+                    const channelMessage = {
+                        content: `<@${user_id}> New trade request ad for item ID ${item_id}.`,
+                        embeds: [embed]
+                    };
                     if (attachment) {
-                        await channel.send({
-                            content: `<@${user_id}> New trade request ad for item ID ${item_id}.`,
-                            embeds: [embed.setImage('attachment://trade_ad.png')],
-                            files: [attachment]
-                        });
-                    } else {
-                        await channel.send({
-                            content: `<@${user_id}> New trade request ad for item ID ${item_id}.`,
-                            embeds: [embed]
-                        });
+                        channelMessage.files = [attachment];
+                        channelMessage.embeds = [embed.setImage('attachment://trade_ad.png')];
                     }
+                    await channel.send(channelMessage);
+
+                    // Check if user has DM forwarding enabled and send DM
+                    if (row.forward_to_dms) {
+                        try {
+                            const user = await client.users.fetch(user_id);
+                            if (user) {
+                                const dmEmbed = new EmbedBuilder()
+                                    .setTitle(`📬 DM: New Trade Ad for ${ad.trackedItemName}`)
+                                    .setDescription(`A new trade ad was found for your tracked item in <#${channel_id}>`)
+                                    .setColor(embedColor)
+                                    .addFields(
+                                        { name: 'Item', value: ad.trackedItemName || 'Unknown', inline: true },
+                                        { name: 'User', value: ad.username, inline: true },
+                                        { name: 'Value Difference', value: ad.valueDiff !== null ? (ad.valueDiff > 0 ? '+' : '') + ad.valueDiff.toLocaleString() : 'N/A', inline: true },
+                                        { name: 'RAP Difference', value: ad.rapDiff !== null ? (ad.rapDiff > 0 ? '+' : '') + ad.rapDiff.toLocaleString() : 'N/A', inline: true },
+                                        { name: 'Channel', value: `<#${channel_id}>`, inline: false }
+                                    )
+                                    .setFooter({ text: 'DM Forwarding - Rolimon\'s Trade Monitor' })
+                                    .setTimestamp();
+
+                                const dmMessage = {
+                                    content: `📬 **DM Forwarding**: New trade ad for your tracked item ID **${item_id}**`,
+                                    embeds: [dmEmbed]
+                                };
+                                if (attachment) {
+                                    dmMessage.files = [attachment];
+                                    dmMessage.embeds = [dmEmbed.setImage('attachment://trade_ad.png')];
+                                }
+                                
+                                await user.send(dmMessage);
+                                console.log(`[AdMonitor] DM sent to user ${user_id} for item ${item_id}`);
+                            }
+                        } catch (dmError) {
+                            console.log(`[AdMonitor] Could not send DM to user ${user_id}: ${dmError.message}`);
+                            // Don't fail the whole process if DM fails
+                        }
+                    }
+                    
                     await db.query(
                         'UPDATE tracked_items SET last_ad_id = $1 WHERE guild_id = $2 AND channel_id = $3 AND user_id = $4 AND item_id = $5',
                         [ad.adId, guild_id, channel_id, user_id, item_id]
