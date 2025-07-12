@@ -17,6 +17,8 @@ const postedAdIds = new Set();
 const botStartupTime = new Date();
 // Track user duplicate ads (user + item combination within 1 hour)
 const userDuplicateCache = new Map(); // key: `${username}-${itemId}`, value: timestamp
+// Track ad content hashes to prevent duplicate content
+const adContentCache = new Map(); // key: `${username}-${itemId}-${adContentHash}`, value: timestamp
 
 function parseAd(ad, trackedItemId) {
     // Username and profile
@@ -27,7 +29,14 @@ function parseAd(ad, trackedItemId) {
     // User profile image
     const userImg = ad.find('.ad_creator_pfp').attr('src') || null;
     // Time
-    const time = ad.find('.trade-ad-timestamp').text().trim();
+    let time = ad.find('.trade-ad-timestamp').text().trim();
+    if (!time) {
+        time = ad.find('[class*="timestamp"]').text().trim();
+    }
+    if (!time) {
+        time = ad.find('[class*="time"]').text().trim();
+    }
+    console.log(`[AdMonitor][DEBUG] Raw time text: "${time}"`);
     // Trade details link
     const detailsAnchor = ad.find('.trade_ad_page_link_button');
     const detailsPath = detailsAnchor.attr('href');
@@ -365,8 +374,26 @@ async function monitorAds(client) {
                     
                     // Only post ads newer than tracking_started_at
                     let adTime = parseAdTime(ad.time);
+                    console.log(`[AdMonitor][DEBUG] Ad time: "${ad.time}" -> parsed: ${adTime}`);
+                    console.log(`[AdMonitor][DEBUG] Tracking started at: ${tracking_started_at}`);
+                    
+                    // Skip ads without valid time since we can't filter them
+                    if (!adTime) {
+                        console.log(`[AdMonitor] Skipping ad without valid time: "${ad.time}"`);
+                        continue;
+                    }
+                    
+                    // Hard limit: Skip ads older than 30 minutes
+                    const currentTime = new Date();
+                    const thirtyMinutesAgo = new Date(currentTime.getTime() - 30 * 60 * 1000);
+                    if (adTime < thirtyMinutesAgo) {
+                        console.log(`[AdMonitor] Skipping ad older than 30 minutes: ${ad.time} (${adTime})`);
+                        continue;
+                    }
+                    
                     if (tracking_started_at && adTime) {
                         const startTime = new Date(tracking_started_at);
+                        console.log(`[AdMonitor][DEBUG] Comparing: adTime ${adTime} vs startTime ${startTime}`);
                         if (adTime < startTime) {
                             console.log(`[AdMonitor] Skipping ad older than tracking start: ${ad.time} < ${startTime}`);
                             continue;
@@ -382,6 +409,14 @@ async function monitorAds(client) {
                         continue;
                     }
                     
+                    // Check for content-based duplicates (same user + item + content within 2 hours)
+                    const adContentHash = `${ad.username}-${item_id}-${ad.offerItems.length}-${ad.requestItems.length}-${ad.offerValue}-${ad.requestValue}`;
+                    const lastContentTime = adContentCache.get(adContentHash);
+                    if (lastContentTime && (now.getTime() - lastContentTime.getTime()) < 7200000) { // 2 hours
+                        console.log(`[AdMonitor] Skipping duplicate content ad from user ${ad.username} for item ${item_id}`);
+                        continue;
+                    }
+                    
                     foundMatch = true;
                     // Prevent duplicate posts (in-memory and DB)
                     if (ad.adId === last_ad_id || postedAdIds.has(ad.adId)) {
@@ -394,6 +429,9 @@ async function monitorAds(client) {
                     // Update user duplicate cache
                     userDuplicateCache.set(userDuplicateKey, now);
                     postedAdIds.add(ad.adId);
+                    
+                    // Update content duplicate cache
+                    adContentCache.set(adContentHash, now);
                     
                     const channel = await client.channels.fetch(channel_id).catch(() => null);
                     if (!channel) continue;
