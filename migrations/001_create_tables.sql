@@ -12,5 +12,6 @@ CREATE TABLE IF NOT EXISTS tracked_items (
   user_id TEXT NOT NULL,
   item_id TEXT NOT NULL,
   last_ad_id TEXT,
+  tracking_started_at TIMESTAMP,
   PRIMARY KEY (guild_id, channel_id, user_id, item_id)
 ); 

@@ -2,6 +2,14 @@ const { EmbedBuilder, AttachmentBuilder } = require('discord.js');
 const puppeteer = require('puppeteer');
 const cheerio = require('cheerio');
 const db = require('./db');
+const PLACEHOLDER_IMAGES = [
+  '/images/transparent-square-110.png',
+  '/images/empty_trade_slot.png',
+  '/images/tradetagany-420.png',
+  '/images/tradetagdemand-420.png',
+  '/images/tradetagupgrade-420.png',
+  '/images/tradetagdowngrade-420.png'
+];
 
 function parseAd(ad, trackedItemId) {
     // Username and profile
@@ -28,9 +36,9 @@ function parseAd(ad, trackedItemId) {
     ad.find('.ad_side_left .ad_item_img').each((i, el) => {
         const img = ad.find('.ad_side_left .ad_item_img').eq(i);
         const alt = img.attr('alt');
-        const src = img.attr('src');
+        const src = img.attr('data-src') || img.attr('src');
         const title = img.attr('data-original-title') || '';
-        if (src && !src.includes('empty_trade_slot') && alt !== 'Offer Slot Thumbnail') {
+        if (src && !PLACEHOLDER_IMAGES.includes(src)) {
             const match = title.match(/^(.*?)<br>Value ([\d,]+)/);
             offerItems.push({
                 name: match ? match[1] : alt,
@@ -52,13 +60,12 @@ function parseAd(ad, trackedItemId) {
         const src = img.attr('data-src') || img.attr('src');
         const title = img.attr('data-original-title') || '';
         const onclick = img.attr('onclick') || '';
-        // Only skip if onclick is empty
-        if (onclick) {
+        if (onclick && src && !PLACEHOLDER_IMAGES.includes(src)) {
             requestItems.push({
                 name: title.split('<br>')[0] || alt,
                 value: (title.match(/Value ([\d,]+)/) || [])[1] || '',
                 rap: (title.match(/RAP ([\d,]+)/) || [])[1] || '',
-                img: src && src.startsWith('http') ? src : `https://www.rolimons.com${src}`,
+                img: src.startsWith('http') ? src : `https://www.rolimons.com${src}`,
                 title,
                 onclick,
                 id: (onclick.match(/item_select_handler\((\d+),/) || [])[1] || ''
@@ -216,7 +223,7 @@ async function monitorAds(client) {
         try {
             const { rows: tracked } = await db.query('SELECT * FROM tracked_items');
             for (const row of tracked) {
-                const { guild_id, channel_id, user_id, item_id, last_ad_id } = row;
+                const { guild_id, channel_id, user_id, item_id, last_ad_id, tracking_started_at } = row;
                 let ads;
                 try {
                     ads = await fetchAllRequestAds(item_id);
@@ -233,6 +240,14 @@ async function monitorAds(client) {
                     // Check if the tracked item is on the request side (string-to-string)
                     const match = ad.requestItems.some(img => String(img.id) === String(item_id));
                     if (!match) continue;
+                    // Only post ads newer than tracking_started_at
+                    if (tracking_started_at && ad.time) {
+                        const adTime = new Date(ad.time);
+                        const startTime = new Date(tracking_started_at);
+                        if (adTime < startTime) {
+                            continue;
+                        }
+                    }
                     foundMatch = true;
                     if (ad.adId === last_ad_id) {
                         break;

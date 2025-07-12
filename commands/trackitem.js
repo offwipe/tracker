@@ -40,10 +40,11 @@ module.exports = {
             const itemName = $('h1').first().text().trim() || 'Unknown Item';
             const itemImage = $('img[src*="/items/"]').first().attr('src');
 
-            // Store tracked item in DB
+            // Store tracked item in DB and set tracking start time
+            const now = new Date();
             await db.query(
-                'INSERT INTO tracked_items (guild_id, channel_id, user_id, item_id) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING',
-                [guildId, channelId, userId, itemId]
+                'INSERT INTO tracked_items (guild_id, channel_id, user_id, item_id, tracking_started_at) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (guild_id, channel_id, user_id, item_id) DO UPDATE SET tracking_started_at = $5',
+                [guildId, channelId, userId, itemId, now]
             );
 
             // Acknowledge tracking
