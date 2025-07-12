@@ -52,8 +52,8 @@ function parseAd(ad, trackedItemId) {
         const src = img.attr('data-src') || img.attr('src');
         const title = img.attr('data-original-title') || '';
         const onclick = img.attr('onclick') || '';
-        // Always try to extract item ID from onclick, regardless of image src
-        if (alt !== 'Request Slot Thumbnail') {
+        // Only skip if onclick is empty
+        if (onclick) {
             requestItems.push({
                 name: title.split('<br>')[0] || alt,
                 value: (title.match(/Value ([\d,]+)/) || [])[1] || '',
