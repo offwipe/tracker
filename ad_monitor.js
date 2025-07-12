@@ -1,5 +1,5 @@
 const { EmbedBuilder } = require('discord.js');
-const axios = require('axios');
+const puppeteer = require('puppeteer');
 const cheerio = require('cheerio');
 const db = require('./db');
 
@@ -77,16 +77,27 @@ function parseAd(ad) {
 
 async function fetchAllRequestAds(itemId) {
     const url = `https://www.rolimons.com/itemtrades/${itemId}`;
-    const response = await axios.get(url, {
-        headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
-    });
-    const html = response.data;
+    let browser, page, html;
+    try {
+        browser = await puppeteer.launch({
+            args: ['--no-sandbox', '--disable-setuid-sandbox'],
+            headless: true
+        });
+        page = await browser.newPage();
+        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
+        await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
+        // Wait for at least one ad to load or timeout after 10s
+        await page.waitForSelector('.mix_item', { timeout: 10000 });
+        html = await page.content();
+    } catch (err) {
+        console.error(`[AdMonitor][Puppeteer] Error loading page for item ${itemId}:`, err);
+        if (browser) await browser.close();
+        return [];
+    }
+    if (browser) await browser.close();
     // Debug: print the first 1000 characters of the HTML
-    console.log(`[AdMonitor][DEBUG] First 1000 chars of HTML for item ${itemId}:\n${html.slice(0, 1000)}`);
+    console.log(`[AdMonitor][DEBUG][Puppeteer] First 1000 chars of HTML for item ${itemId}:\n${html.slice(0, 1000)}`);
     const $ = cheerio.load(html);
-    // Find all .mix_item (ads)
     const ads = [];
     $('.mix_item').each((i, el) => {
         const adElem = $(el);
