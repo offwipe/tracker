@@ -1,4 +1,4 @@
-const { EmbedBuilder } = require('discord.js');
+const { EmbedBuilder, AttachmentBuilder } = require('discord.js');
 const puppeteer = require('puppeteer');
 const cheerio = require('cheerio');
 const db = require('./db');
@@ -86,7 +86,6 @@ async function fetchAllRequestAds(itemId) {
         page = await browser.newPage();
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
         await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
-        // Wait for at least one ad to load or timeout after 10s
         await page.waitForSelector('.mix_item', { timeout: 10000 });
         html = await page.content();
     } catch (err) {
@@ -95,17 +94,38 @@ async function fetchAllRequestAds(itemId) {
         return [];
     }
     if (browser) await browser.close();
-    // Debug: print the first 1000 characters of the HTML
-    console.log(`[AdMonitor][DEBUG][Puppeteer] First 1000 chars of HTML for item ${itemId}:\n${html.slice(0, 1000)}`);
     const $ = cheerio.load(html);
     const ads = [];
     $('.mix_item').each((i, el) => {
         const adElem = $(el);
         const ad = parseAd(adElem);
         const adId = ad.detailsUrl || Buffer.from(adElem.html()).toString('base64');
-        ads.push({ ...ad, adId, url, adElem });
+        ads.push({ ...ad, adId, url, adElemIndex: i });
     });
     return ads;
+}
+
+async function getTradeAdScreenshot(itemId, adElemIndex) {
+    const url = `https://www.rolimons.com/itemtrades/${itemId}`;
+    let browser, page, buffer = null;
+    try {
+        browser = await puppeteer.launch({
+            args: ['--no-sandbox', '--disable-setuid-sandbox'],
+            headless: true
+        });
+        page = await browser.newPage();
+        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
+        await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
+        await page.waitForSelector('.mix_item', { timeout: 10000 });
+        const adHandles = await page.$$('.mix_item');
+        if (adHandles[adElemIndex]) {
+            buffer = await adHandles[adElemIndex].screenshot({ encoding: 'binary', type: 'png' });
+        }
+    } catch (err) {
+        console.error(`[AdMonitor][Puppeteer] Error taking screenshot for item ${itemId}:`, err);
+    }
+    if (browser) await browser.close();
+    return buffer;
 }
 
 async function monitorAds(client) {
@@ -125,51 +145,68 @@ async function monitorAds(client) {
                     console.log(`[AdMonitor] No ads found for item ${item_id}`);
                     continue;
                 }
-                console.log(`[AdMonitor] Found ${ads.length} ads for item ${item_id}`);
                 let foundMatch = false;
                 for (const ad of ads) {
                     // Check if the tracked item is on the request side
                     const match = ad.requestItems.some(img => {
-                        // Check in onclick or data-original-title for the item ID
                         return (img.onclick && img.onclick.includes(item_id)) || (img.title && img.title.includes(item_id));
                     });
-                    console.log(`[AdMonitor] Checking adId: ${ad.adId} for item ${item_id} | Request side match: ${match}`);
                     if (!match) continue;
                     foundMatch = true;
                     if (ad.adId === last_ad_id) {
-                        console.log(`[AdMonitor] Skipping adId: ${ad.adId} (already posted)`);
-                        break; // Only post new ads since last seen
+                        break;
                     }
                     const channel = await client.channels.fetch(channel_id).catch(() => null);
                     if (!channel) continue;
-                    // Build embed
+
+                    // Fetch trade ad screenshot
+                    let attachment = null;
+                    try {
+                        const buffer = await getTradeAdScreenshot(item_id, ad.adElemIndex);
+                        if (buffer) {
+                            attachment = new AttachmentBuilder(buffer, { name: 'trade_ad.png' });
+                        }
+                    } catch (err) {
+                        console.error(`[AdMonitor] Screenshot error:`, err);
+                    }
+
+                    // Build embed with improved formatting
                     const embed = new EmbedBuilder()
-                        .setTitle('New Trade Request Ad')
-                        .setDescription(`User: [${ad.username}](${ad.profileUrl})\nPosted: ${ad.time}`)
+                        .setTitle(`Send ${ad.username} a Trade`)
+                        .setURL(ad.sendTradeUrl || ad.profileUrl)
                         .addFields(
-                            { name: 'Offer', value: ad.offerItems.map(i => `${i.name} (${i.value})`).join(', ') || 'None', inline: false },
-                            { name: 'Offer Value', value: ad.offerValue || 'N/A', inline: true },
-                            { name: 'Offer RAP', value: ad.offerRAP || 'N/A', inline: true },
-                            { name: 'Request', value: ad.requestItems.map(i => `${i.name} (${i.value})`).join(', ') || 'None', inline: false },
-                            { name: 'Request Value', value: ad.requestValue || 'N/A', inline: true },
-                            { name: 'Request RAP', value: ad.requestRAP || 'N/A', inline: true }
+                            { name: 'Item', value: ad.requestItems.map(i => i.name).join(', ') || 'Unknown', inline: true },
+                            { name: 'Rolimon\'s Profile', value: `[View Profile](${ad.profileUrl})`, inline: true },
+                            { name: 'Roblox Trade Link', value: ad.sendTradeUrl ? `[Send Trade](${ad.sendTradeUrl})` : 'N/A', inline: true },
+                            { name: 'Trade Ads Created', value: 'N/A', inline: true },
+                            { name: 'User Total Value', value: ad.offerValue || 'N/A', inline: true },
+                            { name: 'Value Difference', value: 'N/A', inline: true },
+                            { name: 'RAP Difference', value: 'N/A', inline: true },
+                            { name: 'Offered', value: ad.offerItems.map(i => i.name).join(', ') || 'None', inline: false },
+                            { name: 'Requested', value: ad.requestItems.map(i => i.name).join(', ') || 'None', inline: false }
                         )
-                        .setURL(ad.detailsUrl || ad.url)
                         .setFooter({ text: 'Rolimon\'s Trade Monitor' })
                         .setTimestamp();
                     if (ad.offerItems[0] && ad.offerItems[0].img) {
                         embed.setThumbnail(ad.offerItems[0].img);
                     }
-                    await channel.send({
-                        content: `<@${user_id}> New trade request ad for item ID ${item_id}. [Send Trade](${ad.sendTradeUrl || ad.profileUrl})`,
-                        embeds: [embed]
-                    });
-                    console.log(`[AdMonitor] Posted adId: ${ad.adId} for item ${item_id}`);
+                    if (attachment) {
+                        await channel.send({
+                            content: `<@${user_id}> New trade request ad for item ID ${item_id}.`,
+                            embeds: [embed.setImage('attachment://trade_ad.png')],
+                            files: [attachment]
+                        });
+                    } else {
+                        await channel.send({
+                            content: `<@${user_id}> New trade request ad for item ID ${item_id}.`,
+                            embeds: [embed]
+                        });
+                    }
                     await db.query(
                         'UPDATE tracked_items SET last_ad_id = $1 WHERE guild_id = $2 AND channel_id = $3 AND user_id = $4 AND item_id = $5',
                         [ad.adId, guild_id, channel_id, user_id, item_id]
                     );
-                    break; // Only post the newest unseen ad per cycle
+                    break;
                 }
                 if (!foundMatch) {
                     console.log(`[AdMonitor] No ads with item ${item_id} on request side found in this cycle.`);
