@@ -63,7 +63,7 @@ module.exports = {
         } catch (error) {
             console.error('Error fetching item data:', error);
             await interaction.editReply({
-                content: `❌ Error fetching data for item ID ${itemId}. Please check if the item ID is valid and try again.`,
+                content: `error: please contact admin`,
                 ephemeral: true
             });
         }

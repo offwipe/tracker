@@ -19,7 +19,7 @@ module.exports = {
       await interaction.reply({ content: `✅ This channel is now whitelisted for tracking commands.`, ephemeral: true });
     } catch (err) {
       console.error(err);
-      await interaction.reply({ content: '❌ Failed to whitelist this channel.', ephemeral: true });
+      await interaction.reply({ content: 'error: please contact admin', ephemeral: true });
     }
   },
 }; 

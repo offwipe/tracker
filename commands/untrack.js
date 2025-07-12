@@ -65,7 +65,7 @@ module.exports = {
         } catch (error) {
             console.error('Error removing tracked item:', error);
             await interaction.editReply({
-                content: `❌ Error removing item ID ${itemId} from tracking. Please try again.`,
+                content: `error: please contact admin`,
                 ephemeral: true
             });
         }

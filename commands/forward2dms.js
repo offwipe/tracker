@@ -111,7 +111,7 @@ module.exports = {
         } catch (error) {
             console.error('Error updating DM forwarding:', error);
             await interaction.editReply({
-                content: `❌ Error updating DM forwarding settings. Please try again.`,
+                content: `error: please contact admin`,
                 ephemeral: true
             });
         }
