@@ -275,7 +275,7 @@ async function monitorAds(client) {
                         )
                         .setFooter({ text: 'Rolimon\'s Trade Monitor' })
                         .setTimestamp();
-                    if (ad.userImg) {
+                    if (ad.userImg && ad.userImg.startsWith('http')) {
                         embed.setThumbnail(ad.userImg);
                     }
                     if (attachment) {
