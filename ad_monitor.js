@@ -333,17 +333,47 @@ function parseAdTime(adTimeStr) {
     // Try to parse "x minutes ago", "x seconds ago", or ISO string
     if (!adTimeStr) return null;
     adTimeStr = adTimeStr.trim();
+    
+    // Only accept very recent time formats (under 2 minutes)
     if (/ago$/.test(adTimeStr)) {
         const now = new Date();
         const min = adTimeStr.match(/(\d+)\s*minute/);
         const sec = adTimeStr.match(/(\d+)\s*second/);
-        if (min) return new Date(now.getTime() - parseInt(min[1]) * 60000);
-        if (sec) return new Date(now.getTime() - parseInt(sec[1]) * 1000);
+        const hour = adTimeStr.match(/(\d+)\s*hour/);
+        
+        // Reject hours and minutes over 2
+        if (hour) {
+            console.log(`[AdMonitor][DEBUG] Rejecting hour-old timestamp: ${adTimeStr}`);
+            return null;
+        }
+        
+        if (min) {
+            const minutes = parseInt(min[1]);
+            if (minutes > 2) {
+                console.log(`[AdMonitor][DEBUG] Rejecting old minute timestamp: ${adTimeStr}`);
+                return null;
+            }
+            return new Date(now.getTime() - minutes * 60000);
+        }
+        if (sec) {
+            return new Date(now.getTime() - parseInt(sec[1]) * 1000);
+        }
         return now;
     }
-    // Try to parse as ISO or date string
+    
+    // Try to parse as ISO or date string, but be very strict
     const parsed = new Date(adTimeStr);
-    return isNaN(parsed) ? null : parsed;
+    if (isNaN(parsed)) return null;
+    
+    // Reject dates that are too old (more than 5 minutes)
+    const now = new Date();
+    const fiveMinutesAgo = new Date(now.getTime() - 5 * 60 * 1000);
+    if (parsed < fiveMinutesAgo) {
+        console.log(`[AdMonitor][DEBUG] Rejecting old parsed date: ${adTimeStr} -> ${parsed}`);
+        return null;
+    }
+    
+    return parsed;
 }
 
 async function monitorAds(client) {
@@ -365,6 +395,13 @@ async function monitorAds(client) {
                 }
                 let foundMatch = false;
                 for (const ad of ads) {
+                    // Early check: Skip ads that don't contain the tracked item
+                    const hasTrackedItem = ad.requestItems.some(img => String(img.id) === String(item_id));
+                    if (!hasTrackedItem) {
+                        console.log(`[AdMonitor][DEBUG] Skipping ad without tracked item ${item_id} in request items: ${ad.requestItems.map(i => i.id).join(', ')}`);
+                        continue;
+                    }
+                    
                     // Check if the tracked item is on the request side (string-to-string)
                     const match = ad.requestItems.some(img => String(img.id) === String(item_id));
                     if (!match) {
@@ -383,11 +420,24 @@ async function monitorAds(client) {
                         continue;
                     }
                     
-                    // Hard limit: Skip ads older than 30 minutes
+                    // Hard limit: Skip ads older than 2 minutes
                     const currentTime = new Date();
-                    const thirtyMinutesAgo = new Date(currentTime.getTime() - 30 * 60 * 1000);
-                    if (adTime < thirtyMinutesAgo) {
-                        console.log(`[AdMonitor] Skipping ad older than 30 minutes: ${ad.time} (${adTime})`);
+                    const twoMinutesAgo = new Date(currentTime.getTime() - 2 * 60 * 1000);
+                    if (adTime < twoMinutesAgo) {
+                        console.log(`[AdMonitor] Skipping ad older than 2 minutes: ${ad.time} (${adTime})`);
+                        continue;
+                    }
+                    
+                    // Additional check: Skip ads that seem too old (more than 5 minutes)
+                    const fiveMinutesAgo = new Date(currentTime.getTime() - 5 * 60 * 1000);
+                    if (adTime < fiveMinutesAgo) {
+                        console.log(`[AdMonitor] Skipping ad older than 5 minutes: ${ad.time} (${adTime})`);
+                        continue;
+                    }
+                    
+                    // Skip ads with suspicious time formats (likely old)
+                    if (ad.time && (ad.time.includes('hour') || ad.time.includes('hours') || ad.time.includes('minute') && ad.time.match(/(\d+)\s*minute/) && parseInt(ad.time.match(/(\d+)\s*minute/)[1]) > 2)) {
+                        console.log(`[AdMonitor] Skipping ad with old timestamp: ${ad.time}`);
                         continue;
                     }
                     
@@ -400,29 +450,32 @@ async function monitorAds(client) {
                         }
                     }
                     
-                    // Check for user duplicate ads (same user + item within 1 hour)
+                    // Check for user duplicate ads (same user + item within 30 minutes)
                     const userDuplicateKey = `${ad.username}-${item_id}`;
                     const now = new Date();
                     const lastUserAdTime = userDuplicateCache.get(userDuplicateKey);
-                    if (lastUserAdTime && (now.getTime() - lastUserAdTime.getTime()) < 3600000) { // 1 hour
-                        console.log(`[AdMonitor] Skipping duplicate ad from user ${ad.username} for item ${item_id} within 1 hour`);
+                    if (lastUserAdTime && (now.getTime() - lastUserAdTime.getTime()) < 1800000) { // 30 minutes
+                        console.log(`[AdMonitor] Skipping duplicate ad from user ${ad.username} for item ${item_id} within 30 minutes`);
                         continue;
                     }
                     
-                    // Check for content-based duplicates (same user + item + content within 2 hours)
+                    // Check for content-based duplicates (same user + item + content within 1 hour)
                     const adContentHash = `${ad.username}-${item_id}-${ad.offerItems.length}-${ad.requestItems.length}-${ad.offerValue}-${ad.requestValue}`;
                     const lastContentTime = adContentCache.get(adContentHash);
-                    if (lastContentTime && (now.getTime() - lastContentTime.getTime()) < 7200000) { // 2 hours
+                    if (lastContentTime && (now.getTime() - lastContentTime.getTime()) < 3600000) { // 1 hour
                         console.log(`[AdMonitor] Skipping duplicate content ad from user ${ad.username} for item ${item_id}`);
+                        continue;
+                    }
+                    
+                    // Check for exact ad duplicates (same ad ID)
+                    if (ad.adId === last_ad_id || postedAdIds.has(ad.adId)) {
+                        console.log(`[AdMonitor] Skipping duplicate ad ID: ${ad.adId}`);
                         continue;
                     }
                     
                     foundMatch = true;
                     // Prevent duplicate posts (in-memory and DB)
-                    if (ad.adId === last_ad_id || postedAdIds.has(ad.adId)) {
-                        console.log(`[AdMonitor] Skipping duplicate ad ID: ${ad.adId}`);
-                        continue;
-                    }
+                    // The above checks are now sufficient for preventing duplicates
                     
                     console.log(`[AdMonitor] Posting new ad for item ${item_id} from user ${ad.username}`);
                     
