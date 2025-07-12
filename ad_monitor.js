@@ -28,13 +28,29 @@ function parseAd(ad, trackedItemId) {
     const profileUrl = profilePath ? `https://www.rolimons.com${profilePath}` : null;
     // User profile image
     const userImg = ad.find('.ad_creator_pfp').attr('src') || null;
-    // Time
+    // Time - try multiple selectors to find the timestamp
     let time = ad.find('.trade-ad-timestamp').text().trim();
     if (!time) {
         time = ad.find('[class*="timestamp"]').text().trim();
     }
     if (!time) {
         time = ad.find('[class*="time"]').text().trim();
+    }
+    if (!time) {
+        time = ad.find('[class*="ago"]').text().trim();
+    }
+    if (!time) {
+        time = ad.find('[title*="ago"]').attr('title');
+    }
+    if (!time) {
+        // Look for any element containing "ago" text
+        ad.find('*').each((i, el) => {
+            const text = $(el).text().trim();
+            if (text && /ago$/.test(text) && !time) {
+                time = text;
+                return false; // break the loop
+            }
+        });
     }
     console.log(`[AdMonitor][DEBUG] Raw time text: "${time}"`);
     // Trade details link
@@ -330,49 +346,67 @@ async function getTradeAdScreenshot(itemId, adElemIndex) {
 }
 
 function parseAdTime(adTimeStr) {
-    // Try to parse "x minutes ago", "x seconds ago", or ISO string
+    // Try to parse "x minutes ago", "x seconds ago", "x hours ago", or ISO string
     if (!adTimeStr) return null;
     adTimeStr = adTimeStr.trim();
     
-    // Only accept very recent time formats (under 2 minutes)
+    console.log(`[AdMonitor][DEBUG] Parsing time string: "${adTimeStr}"`);
+    
+    // Handle "ago" format timestamps from HTML
     if (/ago$/.test(adTimeStr)) {
         const now = new Date();
-        const min = adTimeStr.match(/(\d+)\s*minute/);
-        const sec = adTimeStr.match(/(\d+)\s*second/);
-        const hour = adTimeStr.match(/(\d+)\s*hour/);
+        const hourMatch = adTimeStr.match(/(\d+)\s*hour/);
+        const minMatch = adTimeStr.match(/(\d+)\s*minute/);
+        const secMatch = adTimeStr.match(/(\d+)\s*second/);
         
-        // Reject hours and minutes over 2
-        if (hour) {
-            console.log(`[AdMonitor][DEBUG] Rejecting hour-old timestamp: ${adTimeStr}`);
+        // Reject hours - too old
+        if (hourMatch) {
+            const hours = parseInt(hourMatch[1]);
+            console.log(`[AdMonitor][DEBUG] Rejecting hour-old timestamp: ${adTimeStr} (${hours} hours)`);
             return null;
         }
         
-        if (min) {
-            const minutes = parseInt(min[1]);
+        // Reject minutes over 2
+        if (minMatch) {
+            const minutes = parseInt(minMatch[1]);
             if (minutes > 2) {
-                console.log(`[AdMonitor][DEBUG] Rejecting old minute timestamp: ${adTimeStr}`);
+                console.log(`[AdMonitor][DEBUG] Rejecting old minute timestamp: ${adTimeStr} (${minutes} minutes > 2)`);
                 return null;
             }
-            return new Date(now.getTime() - minutes * 60000);
+            const adTime = new Date(now.getTime() - minutes * 60000);
+            console.log(`[AdMonitor][DEBUG] Accepted minute timestamp: ${adTimeStr} -> ${adTime}`);
+            return adTime;
         }
-        if (sec) {
-            return new Date(now.getTime() - parseInt(sec[1]) * 1000);
+        
+        // Accept any seconds timestamp (auto-accept for freshness)
+        if (secMatch) {
+            const seconds = parseInt(secMatch[1]);
+            const adTime = new Date(now.getTime() - seconds * 1000);
+            console.log(`[AdMonitor][DEBUG] Auto-accepted seconds timestamp: ${adTimeStr} -> ${adTime} (${seconds} seconds ago)`);
+            return adTime;
         }
-        return now;
+        
+        // If it ends with "ago" but doesn't match our patterns, reject it
+        console.log(`[AdMonitor][DEBUG] Rejecting unknown "ago" format: ${adTimeStr}`);
+        return null;
     }
     
     // Try to parse as ISO or date string, but be very strict
     const parsed = new Date(adTimeStr);
-    if (isNaN(parsed)) return null;
-    
-    // Reject dates that are too old (more than 5 minutes)
-    const now = new Date();
-    const fiveMinutesAgo = new Date(now.getTime() - 5 * 60 * 1000);
-    if (parsed < fiveMinutesAgo) {
-        console.log(`[AdMonitor][DEBUG] Rejecting old parsed date: ${adTimeStr} -> ${parsed}`);
+    if (isNaN(parsed)) {
+        console.log(`[AdMonitor][DEBUG] Could not parse as date: ${adTimeStr}`);
         return null;
     }
     
+    // Reject dates that are too old (more than 2 minutes)
+    const now = new Date();
+    const twoMinutesAgo = new Date(now.getTime() - 2 * 60 * 1000);
+    if (parsed < twoMinutesAgo) {
+        console.log(`[AdMonitor][DEBUG] Rejecting old parsed date: ${adTimeStr} -> ${parsed} (older than 2 minutes)`);
+        return null;
+    }
+    
+    console.log(`[AdMonitor][DEBUG] Accepted parsed date: ${adTimeStr} -> ${parsed}`);
     return parsed;
 }
 
@@ -428,17 +462,33 @@ async function monitorAds(client) {
                         continue;
                     }
                     
-                    // Additional check: Skip ads that seem too old (more than 5 minutes)
-                    const fiveMinutesAgo = new Date(currentTime.getTime() - 5 * 60 * 1000);
-                    if (adTime < fiveMinutesAgo) {
-                        console.log(`[AdMonitor] Skipping ad older than 5 minutes: ${ad.time} (${adTime})`);
-                        continue;
-                    }
-                    
-                    // Skip ads with suspicious time formats (likely old)
-                    if (ad.time && (ad.time.includes('hour') || ad.time.includes('hours') || ad.time.includes('minute') && ad.time.match(/(\d+)\s*minute/) && parseInt(ad.time.match(/(\d+)\s*minute/)[1]) > 2)) {
-                        console.log(`[AdMonitor] Skipping ad with old timestamp: ${ad.time}`);
-                        continue;
+                    // Additional filtering based on raw time text
+                    if (ad.time) {
+                        const timeText = ad.time.toLowerCase();
+                        
+                        // Auto-accept any ad with "seconds" in the timestamp (very fresh)
+                        if (timeText.includes('second')) {
+                            console.log(`[AdMonitor] Auto-accepting ad with seconds timestamp: ${ad.time} (very fresh)`);
+                            // Continue to next checks (don't skip)
+                        }
+                        // Skip any ads with "hour" or "hours" in the timestamp
+                        else if (timeText.includes('hour') || timeText.includes('hours')) {
+                            console.log(`[AdMonitor] Skipping ad with hour-old timestamp: ${ad.time}`);
+                            continue;
+                        }
+                        // Skip ads with minutes > 2
+                        else if (timeText.includes('minute')) {
+                            const minuteMatch = timeText.match(/(\d+)\s*minute/);
+                            if (minuteMatch && parseInt(minuteMatch[1]) > 2) {
+                                console.log(`[AdMonitor] Skipping ad with old minute timestamp: ${ad.time} (${minuteMatch[1]} minutes > 2)`);
+                                continue;
+                            }
+                        }
+                        // Skip ads with "day" or "days" in timestamp
+                        else if (timeText.includes('day') || timeText.includes('days')) {
+                            console.log(`[AdMonitor] Skipping ad with day-old timestamp: ${ad.time}`);
+                            continue;
+                        }
                     }
                     
                     if (tracking_started_at && adTime) {
