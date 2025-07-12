@@ -460,7 +460,7 @@ async function monitorAds(client) {
                             const user = await client.users.fetch(user_id);
                             if (user) {
                                 const dmEmbed = new EmbedBuilder()
-                                    .setTitle(`📬 DM: New Trade Ad for ${ad.trackedItemName}`)
+                                    .setTitle(`DM: New Trade Ad for ${ad.trackedItemName}`)
                                     .setDescription(`A new trade ad was found for your tracked item in <#${channel_id}>`)
                                     .setColor(embedColor)
                                     .addFields(
@@ -474,7 +474,7 @@ async function monitorAds(client) {
                                     .setTimestamp();
 
                                 const dmMessage = {
-                                    content: `📬 **DM Forwarding**: New trade ad for your tracked item ID **${item_id}**`,
+                                    content: `DM Forwarding: New trade ad for your tracked item ID **${item_id}**`,
                                     embeds: [dmEmbed]
                                 };
                                 if (attachment) {
