@@ -11,6 +11,9 @@ const PLACEHOLDER_IMAGES = [
   '/images/tradetagdowngrade-420.png'
 ];
 
+// In-memory cache to prevent rapid duplicate posts (reset on restart)
+const postedAdIds = new Set();
+
 function parseAd(ad, trackedItemId) {
     // Username and profile
     const userAnchor = ad.find('.ad_creator_name');
@@ -218,6 +221,23 @@ async function getTradeAdScreenshot(itemId, adElemIndex) {
     return buffer;
 }
 
+function parseAdTime(adTimeStr) {
+    // Try to parse "x minutes ago", "x seconds ago", or ISO string
+    if (!adTimeStr) return null;
+    adTimeStr = adTimeStr.trim();
+    if (/ago$/.test(adTimeStr)) {
+        const now = new Date();
+        const min = adTimeStr.match(/(\d+)\s*minute/);
+        const sec = adTimeStr.match(/(\d+)\s*second/);
+        if (min) return new Date(now.getTime() - parseInt(min[1]) * 60000);
+        if (sec) return new Date(now.getTime() - parseInt(sec[1]) * 1000);
+        return now;
+    }
+    // Try to parse as ISO or date string
+    const parsed = new Date(adTimeStr);
+    return isNaN(parsed) ? null : parsed;
+}
+
 async function monitorAds(client) {
     setInterval(async () => {
         try {
@@ -241,17 +261,19 @@ async function monitorAds(client) {
                     const match = ad.requestItems.some(img => String(img.id) === String(item_id));
                     if (!match) continue;
                     // Only post ads newer than tracking_started_at
-                    if (tracking_started_at && ad.time) {
-                        const adTime = new Date(ad.time);
+                    let adTime = parseAdTime(ad.time);
+                    if (tracking_started_at && adTime) {
                         const startTime = new Date(tracking_started_at);
                         if (adTime < startTime) {
                             continue;
                         }
                     }
                     foundMatch = true;
-                    if (ad.adId === last_ad_id) {
-                        break;
+                    // Prevent duplicate posts (in-memory and DB)
+                    if (ad.adId === last_ad_id || postedAdIds.has(ad.adId)) {
+                        continue;
                     }
+                    postedAdIds.add(ad.adId);
                     const channel = await client.channels.fetch(channel_id).catch(() => null);
                     if (!channel) continue;
 
@@ -318,7 +340,7 @@ async function monitorAds(client) {
         } catch (err) {
             console.error('Error in ad monitor:', err);
         }
-    }, 10000);
+    }, 60000); // 60 seconds
 }
 
 module.exports = monitorAds; 
