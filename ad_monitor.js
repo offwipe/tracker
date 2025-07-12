@@ -150,6 +150,11 @@ async function fetchAllRequestAds(itemId) {
     const ads = [];
     $('.mix_item').each((i, el) => {
         const adElem = $(el);
+        if (i === 0) {
+            // Log the raw HTML of the request side for the first ad
+            const requestSideHtml = adElem.find('.ad_side_right').html();
+            console.log(`[AdMonitor][DEBUG] Raw HTML of .ad_side_right for first ad:\n${requestSideHtml}`);
+        }
         const ad = parseAd(adElem, itemId);
         const adId = ad.detailsUrl || Buffer.from(adElem.html()).toString('base64');
         ads.push({ ...ad, adId, url, adElemIndex: i });
