@@ -204,6 +204,9 @@ async function monitorAds(client) {
                 }
                 let foundMatch = false;
                 for (const ad of ads) {
+                    // Log all request-side item IDs for this ad
+                    const requestItemIds = ad.requestItems.map(img => img.id);
+                    console.log(`[AdMonitor][DEBUG] Tracked item ID: ${item_id}, Request side item IDs: ${JSON.stringify(requestItemIds)}`);
                     // Check if the tracked item is on the request side
                     const match = ad.requestItems.some(img => {
                         return (img.id === item_id) || (img.onclick && img.onclick.includes(item_id));
