@@ -16,7 +16,9 @@ function parseAd(ad) {
     const detailsPath = detailsAnchor.attr('href');
     const detailsUrl = detailsPath ? `https://www.rolimons.com${detailsPath}` : null;
     // Send trade link
-    const sendTradeAnchor = ad.find('.send_trade_button');
+    const sendTradeAnchor = ad.find('.send_trade_button').filter(function() {
+        return !ad.find('.send_trade_button').eq(0).attr('onclick'); // Exclude 'Remove' button
+    });
     const sendTradeUrl = sendTradeAnchor.attr('href');
 
     // Offer items
@@ -26,8 +28,7 @@ function parseAd(ad) {
         const alt = img.attr('alt');
         const src = img.attr('src');
         const title = img.attr('data-original-title') || '';
-        if (src && !src.includes('empty_trade_slot')) {
-            // Try to extract name and value from title
+        if (src && !src.includes('empty_trade_slot') && alt !== 'Offer Slot Thumbnail') {
             const match = title.match(/^(.*?)<br>Value ([\d,]+)/);
             offerItems.push({
                 name: match ? match[1] : alt,
@@ -48,17 +49,35 @@ function parseAd(ad) {
         const src = img.attr('src');
         const title = img.attr('data-original-title') || '';
         const onclick = img.attr('onclick') || '';
-        requestItems.push({
-            name: title.split('<br>')[0] || alt,
-            value: (title.match(/Value ([\d,]+)/) || [])[1] || '',
-            img: src.startsWith('http') ? src : `https://www.rolimons.com${src}`,
-            title,
-            onclick
-        });
+        if (src && !src.includes('empty_trade_slot') && alt !== 'Request Slot Thumbnail') {
+            requestItems.push({
+                name: title.split('<br>')[0] || alt,
+                value: (title.match(/Value ([\d,]+)/) || [])[1] || '',
+                img: src.startsWith('http') ? src : `https://www.rolimons.com${src}`,
+                title,
+                onclick
+            });
+        }
     });
     // Request value/RAP
     const requestValue = ad.find('.ad_side_right .stat_value').first().text().trim();
     const requestRAP = ad.find('.ad_side_right .stat_rap').first().text().trim();
+
+    // Value difference and RAP difference (try to parse from ad details if present)
+    let valueDiff = null, rapDiff = null;
+    const diffText = ad.text();
+    const valueDiffMatch = diffText.match(/([+-]?[\d,.]+) ?k? ?\(.*a\/t\)/i) || diffText.match(/([+-]?[\d,.]+) ?k? ?value difference/i);
+    if (valueDiffMatch) valueDiff = valueDiffMatch[1];
+    const rapDiffMatch = diffText.match(/RAP Difference\s*([+-]?[\d,.]+)/i);
+    if (rapDiffMatch) rapDiff = rapDiffMatch[1];
+
+    // Trade ads created (not always available)
+    let adsCreated = null;
+    const adsCreatedMatch = diffText.match(/Ads Created\s*(\d+)/i);
+    if (adsCreatedMatch) adsCreated = adsCreatedMatch[1];
+
+    // User total value (try to parse from left side value)
+    let userTotalValue = offerValue || null;
 
     return {
         username,
@@ -71,7 +90,11 @@ function parseAd(ad) {
         offerRAP,
         requestItems,
         requestValue,
-        requestRAP
+        requestRAP,
+        valueDiff,
+        rapDiff,
+        adsCreated,
+        userTotalValue
     };
 }
 
@@ -117,6 +140,13 @@ async function getTradeAdScreenshot(itemId, adElemIndex) {
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
         await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
         await page.waitForSelector('.mix_item', { timeout: 10000 });
+        // Hide cookie/privacy banner if present
+        await page.evaluate(() => {
+            const banners = document.querySelectorAll('[id*="consent"], .qc-cmp2-container, .qc-cmp2-summary, .qc-cmp2-footer, .qc-cmp2-main, .qc-cmp2-ui, .qc-cmp2-persistent-link, .qc-cmp2-dialog, .qc-cmp2-custom-popup, .qc-cmp2-overlay, .qc-cmp2-banner, .qc-cmp2-summary-info, .qc-cmp2-summary-buttons, .qc-cmp2-summary-info, .qc-cmp2-summary-buttons, .qc-cmp2-summary, .qc-cmp2-footer, .qc-cmp2-main, .qc-cmp2-ui, .qc-cmp2-persistent-link, .qc-cmp2-dialog, .qc-cmp2-custom-popup, .qc-cmp2-overlay, .qc-cmp2-banner, .qc-cmp2-summary-info, .qc-cmp2-summary-buttons');
+            banners.forEach(b => b.style.display = 'none');
+            const privacy = document.querySelector('div[role="dialog"], .truste_overlay, .truste_box, .truste_box_overlay, .truste_box_content, .truste_box_buttons, .truste_box_links, .truste_box_title, .truste_box_message, .truste_box_close, .truste_box_accept, .truste_box_reject, .truste_box_settings, .truste_box_more, .truste_box_less, .truste_box_policy, .truste_box_policy_link, .truste_box_policy_text, .truste_box_policy_title, .truste_box_policy_message, .truste_box_policy_accept, .truste_box_policy_reject, .truste_box_policy_settings, .truste_box_policy_more, .truste_box_policy_less, .truste_box_policy_policy, .truste_box_policy_policy_link, .truste_box_policy_policy_text, .truste_box_policy_policy_title, .truste_box_policy_policy_message, .truste_box_policy_policy_accept, .truste_box_policy_policy_reject, .truste_box_policy_policy_settings, .truste_box_policy_policy_more, .truste_box_policy_policy_less');
+            if (privacy) privacy.style.display = 'none';
+        });
         const adHandles = await page.$$('.mix_item');
         if (adHandles[adElemIndex]) {
             buffer = await adHandles[adElemIndex].screenshot({ encoding: 'binary', type: 'png' });
@@ -170,18 +200,28 @@ async function monitorAds(client) {
                         console.error(`[AdMonitor] Screenshot error:`, err);
                     }
 
+                    // Determine embed color based on value difference
+                    let embedColor = 0x2ecc40; // green by default
+                    if (ad.valueDiff) {
+                        const num = parseFloat(ad.valueDiff.replace(/,/g, ''));
+                        if (!isNaN(num)) {
+                            embedColor = num >= 0 ? 0x2ecc40 : 0xe74c3c; // green or red
+                        }
+                    }
+
                     // Build embed with improved formatting
                     const embed = new EmbedBuilder()
                         .setTitle(`Send ${ad.username} a Trade`)
                         .setURL(ad.sendTradeUrl || ad.profileUrl)
+                        .setColor(embedColor)
                         .addFields(
-                            { name: 'Item', value: ad.requestItems.map(i => i.name).join(', ') || 'Unknown', inline: true },
+                            { name: 'Item', value: ad.requestItems.find(i => i.onclick && i.onclick.includes(item_id))?.name || 'Unknown', inline: true },
                             { name: 'Rolimon\'s Profile', value: `[View Profile](${ad.profileUrl})`, inline: true },
                             { name: 'Roblox Trade Link', value: ad.sendTradeUrl ? `[Send Trade](${ad.sendTradeUrl})` : 'N/A', inline: true },
-                            { name: 'Trade Ads Created', value: 'N/A', inline: true },
-                            { name: 'User Total Value', value: ad.offerValue || 'N/A', inline: true },
-                            { name: 'Value Difference', value: 'N/A', inline: true },
-                            { name: 'RAP Difference', value: 'N/A', inline: true },
+                            { name: 'Trade Ads Created', value: ad.adsCreated || 'N/A', inline: true },
+                            { name: 'User Total Value', value: ad.userTotalValue || 'N/A', inline: true },
+                            { name: 'Value Difference', value: ad.valueDiff || 'N/A', inline: true },
+                            { name: 'RAP Difference', value: ad.rapDiff || 'N/A', inline: true },
                             { name: 'Offered', value: ad.offerItems.map(i => i.name).join(', ') || 'None', inline: false },
                             { name: 'Requested', value: ad.requestItems.map(i => i.name).join(', ') || 'None', inline: false }
                         )
