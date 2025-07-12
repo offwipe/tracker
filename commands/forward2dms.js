@@ -88,10 +88,17 @@ module.exports = {
                     [enabled, guildId, channelId, userId]
                 );
 
+                // Create a list of tracked item IDs for display
+                const itemIds = trackedRows.map(row => row.item_id).join(', ');
+                
                 const embed = new EmbedBuilder()
                     .setColor(enabled ? '#00ff00' : '#ff0000')
                     .setTitle(enabled ? '📬 DM Forwarding Enabled' : '📭 DM Forwarding Disabled')
-                    .setDescription(`DM forwarding has been ${enabled ? 'enabled' : 'disabled'} for all your tracked items (${trackedRows.length} items).`)
+                    .setDescription(`DM forwarding has been ${enabled ? 'enabled' : 'disabled'} for all your tracked items.`)
+                    .addFields(
+                        { name: 'Items Affected', value: `${trackedRows.length} items`, inline: true },
+                        { name: 'Item IDs', value: itemIds.length > 100 ? itemIds.substring(0, 97) + '...' : itemIds, inline: false }
+                    )
                     .setFooter({ text: 'DM forwarding updated', iconURL: 'https://www.rolimons.com/favicon.ico' })
                     .setTimestamp();
 
