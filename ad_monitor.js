@@ -47,14 +47,14 @@ function parseAd(ad) {
         const alt = img.attr('alt');
         const src = img.attr('src');
         const title = img.attr('data-original-title') || '';
-        if (src && !src.includes('empty_trade_slot')) {
-            const match = title.match(/^(.*?)<br>Value ([\d,]+)/);
-            requestItems.push({
-                name: match ? match[1] : alt,
-                value: match ? match[2] : '',
-                img: src.startsWith('http') ? src : `https://www.rolimons.com${src}`
-            });
-        }
+        const onclick = img.attr('onclick') || '';
+        requestItems.push({
+            name: title.split('<br>')[0] || alt,
+            value: (title.match(/Value ([\d,]+)/) || [])[1] || '',
+            img: src.startsWith('http') ? src : `https://www.rolimons.com${src}`,
+            title,
+            onclick
+        });
     });
     // Request value/RAP
     const requestValue = ad.find('.ad_side_right .stat_value').first().text().trim();
@@ -89,7 +89,7 @@ async function fetchAllRequestAds(itemId) {
         const adElem = $(el);
         const ad = parseAd(adElem);
         const adId = ad.detailsUrl || Buffer.from(adElem.html()).toString('base64');
-        ads.push({ ...ad, adId, url });
+        ads.push({ ...ad, adId, url, adElem });
     });
     return ads;
 }
@@ -112,8 +112,16 @@ async function monitorAds(client) {
                     continue;
                 }
                 console.log(`[AdMonitor] Found ${ads.length} ads for item ${item_id}`);
+                let foundMatch = false;
                 for (const ad of ads) {
-                    console.log(`[AdMonitor] Checking adId: ${ad.adId} for item ${item_id}`);
+                    // Check if the tracked item is on the request side
+                    const match = ad.requestItems.some(img => {
+                        // Check in onclick or data-original-title for the item ID
+                        return (img.onclick && img.onclick.includes(item_id)) || (img.title && img.title.includes(item_id));
+                    });
+                    console.log(`[AdMonitor] Checking adId: ${ad.adId} for item ${item_id} | Request side match: ${match}`);
+                    if (!match) continue;
+                    foundMatch = true;
                     if (ad.adId === last_ad_id) {
                         console.log(`[AdMonitor] Skipping adId: ${ad.adId} (already posted)`);
                         break; // Only post new ads since last seen
@@ -148,6 +156,9 @@ async function monitorAds(client) {
                         [ad.adId, guild_id, channel_id, user_id, item_id]
                     );
                     break; // Only post the newest unseen ad per cycle
+                }
+                if (!foundMatch) {
+                    console.log(`[AdMonitor] No ads with item ${item_id} on request side found in this cycle.`);
                 }
             }
         } catch (err) {
