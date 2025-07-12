@@ -38,4 +38,10 @@ for (const file of eventFiles) {
     }
 }
 
+const monitorAds = require('./ad_monitor');
+
+client.once('ready', () => {
+    monitorAds(client);
+});
+
 client.login(process.env.DISCORD_TOKEN); 
