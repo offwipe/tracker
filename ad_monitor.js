@@ -363,14 +363,8 @@ async function monitorAds(client) {
                         continue;
                     }
                     
-                    // Filter out ads older than bot startup time
-                    let adTime = parseAdTime(ad.time);
-                    if (adTime && adTime < botStartupTime) {
-                        console.log(`[AdMonitor] Skipping ad older than bot startup: ${ad.time}`);
-                        continue;
-                    }
-                    
                     // Only post ads newer than tracking_started_at
+                    let adTime = parseAdTime(ad.time);
                     if (tracking_started_at && adTime) {
                         const startTime = new Date(tracking_started_at);
                         if (adTime < startTime) {
