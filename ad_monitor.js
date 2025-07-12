@@ -1,7 +1,79 @@
-const { Client, EmbedBuilder } = require('discord.js');
+const { EmbedBuilder } = require('discord.js');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const db = require('./db');
+
+function parseAd(ad) {
+    // Username and profile
+    const userAnchor = ad.find('.ad_creator_name');
+    const username = userAnchor.text().trim();
+    const profilePath = userAnchor.attr('href');
+    const profileUrl = profilePath ? `https://www.rolimons.com${profilePath}` : null;
+    // Time
+    const time = ad.find('.trade-ad-timestamp').text().trim();
+    // Trade details link
+    const detailsAnchor = ad.find('.trade_ad_page_link_button');
+    const detailsPath = detailsAnchor.attr('href');
+    const detailsUrl = detailsPath ? `https://www.rolimons.com${detailsPath}` : null;
+    // Send trade link
+    const sendTradeAnchor = ad.find('.send_trade_button');
+    const sendTradeUrl = sendTradeAnchor.attr('href');
+
+    // Offer items
+    const offerItems = [];
+    ad.find('.ad_side_left .ad_item_img').each((i, el) => {
+        const img = ad.find('.ad_side_left .ad_item_img').eq(i);
+        const alt = img.attr('alt');
+        const src = img.attr('src');
+        const title = img.attr('data-original-title') || '';
+        if (src && !src.includes('empty_trade_slot')) {
+            // Try to extract name and value from title
+            const match = title.match(/^(.*?)<br>Value ([\d,]+)/);
+            offerItems.push({
+                name: match ? match[1] : alt,
+                value: match ? match[2] : '',
+                img: src.startsWith('http') ? src : `https://www.rolimons.com${src}`
+            });
+        }
+    });
+    // Offer value/RAP
+    const offerValue = ad.find('.ad_side_left .stat_value').first().text().trim();
+    const offerRAP = ad.find('.ad_side_left .stat_rap').first().text().trim();
+
+    // Request items
+    const requestItems = [];
+    ad.find('.ad_side_right .ad_item_img').each((i, el) => {
+        const img = ad.find('.ad_side_right .ad_item_img').eq(i);
+        const alt = img.attr('alt');
+        const src = img.attr('src');
+        const title = img.attr('data-original-title') || '';
+        if (src && !src.includes('empty_trade_slot')) {
+            const match = title.match(/^(.*?)<br>Value ([\d,]+)/);
+            requestItems.push({
+                name: match ? match[1] : alt,
+                value: match ? match[2] : '',
+                img: src.startsWith('http') ? src : `https://www.rolimons.com${src}`
+            });
+        }
+    });
+    // Request value/RAP
+    const requestValue = ad.find('.ad_side_right .stat_value').first().text().trim();
+    const requestRAP = ad.find('.ad_side_right .stat_rap').first().text().trim();
+
+    return {
+        username,
+        profileUrl,
+        time,
+        detailsUrl,
+        sendTradeUrl,
+        offerItems,
+        offerValue,
+        offerRAP,
+        requestItems,
+        requestValue,
+        requestRAP
+    };
+}
 
 async function fetchLatestRequestAd(itemId) {
     const url = `https://www.rolimons.com/itemtrades/${itemId}`;
@@ -11,39 +83,21 @@ async function fetchLatestRequestAd(itemId) {
         }
     });
     const $ = cheerio.load(response.data);
-
-    // Find the first request ad (this logic may need to be updated if Rolimon's changes their layout)
-    let ad = null;
-    $('.trade-ad, .trade-entry, .trade-item, [class*="trade"]').each((i, el) => {
-        const text = $(el).text().toLowerCase();
-        if (text.includes('request') || text.includes('want') || text.includes('buying')) {
-            ad = $(el);
-            return false; // break
-        }
-    });
-    if (!ad) return null;
-
-    // Try to extract a unique ad id (fallback to ad text hash)
-    const adText = ad.text().trim();
-    const adId = ad.attr('data-id') || Buffer.from(adText).toString('base64');
-
-    // Extract ad details for the embed
-    return {
-        adId,
-        adText,
-        adHtml: ad.html(),
-        url,
-    };
+    // Find the first .mix_item (ad)
+    const adElem = $('.mix_item').first();
+    if (!adElem || adElem.length === 0) return null;
+    const ad = parseAd(adElem);
+    // Use detailsUrl or ad HTML as unique ID
+    const adId = ad.detailsUrl || Buffer.from(adElem.html()).toString('base64');
+    return { ...ad, adId, url };
 }
 
 async function monitorAds(client) {
     setInterval(async () => {
         try {
-            // Get all tracked items
             const { rows: tracked } = await db.query('SELECT * FROM tracked_items');
             for (const row of tracked) {
                 const { guild_id, channel_id, user_id, item_id, last_ad_id } = row;
-                // Fetch latest request ad
                 let ad;
                 try {
                     ad = await fetchLatestRequestAd(item_id);
@@ -52,26 +106,32 @@ async function monitorAds(client) {
                     continue;
                 }
                 if (!ad) continue;
-                if (ad.adId === last_ad_id) continue; // No new ad
-
-                // Post the ad in the channel
+                if (ad.adId === last_ad_id) continue;
                 const channel = await client.channels.fetch(channel_id).catch(() => null);
                 if (!channel) continue;
-
-                // Build a clean embed (no emojis)
+                // Build embed
                 const embed = new EmbedBuilder()
-                    .setTitle('New Trade Request Ad Found')
-                    .setDescription(`Item ID: ${item_id}\n[View on Rolimon's](${ad.url})`)
-                    .addFields({ name: 'Ad Details', value: ad.adText.substring(0, 1024) })
+                    .setTitle('New Trade Request Ad')
+                    .setDescription(`User: [${ad.username}](${ad.profileUrl})\nPosted: ${ad.time}`)
+                    .addFields(
+                        { name: 'Offer', value: ad.offerItems.map(i => `${i.name} (${i.value})`).join(', ') || 'None', inline: false },
+                        { name: 'Offer Value', value: ad.offerValue || 'N/A', inline: true },
+                        { name: 'Offer RAP', value: ad.offerRAP || 'N/A', inline: true },
+                        { name: 'Request', value: ad.requestItems.map(i => `${i.name} (${i.value})`).join(', ') || 'None', inline: false },
+                        { name: 'Request Value', value: ad.requestValue || 'N/A', inline: true },
+                        { name: 'Request RAP', value: ad.requestRAP || 'N/A', inline: true }
+                    )
+                    .setURL(ad.detailsUrl || ad.url)
                     .setFooter({ text: 'Rolimon\'s Trade Monitor' })
                     .setTimestamp();
-
+                // Add first offer/request item image as thumbnail if available
+                if (ad.offerItems[0] && ad.offerItems[0].img) {
+                    embed.setThumbnail(ad.offerItems[0].img);
+                }
                 await channel.send({
-                    content: `<@${user_id}> A new trade request ad was found for item ID ${item_id}.`,
+                    content: `<@${user_id}> New trade request ad for item ID ${item_id}. [Send Trade](${ad.sendTradeUrl || ad.profileUrl})`,
                     embeds: [embed]
                 });
-
-                // Update last_ad_id in DB
                 await db.query(
                     'UPDATE tracked_items SET last_ad_id = $1 WHERE guild_id = $2 AND channel_id = $3 AND user_id = $4 AND item_id = $5',
                     [ad.adId, guild_id, channel_id, user_id, item_id]
@@ -80,7 +140,7 @@ async function monitorAds(client) {
         } catch (err) {
             console.error('Error in ad monitor:', err);
         }
-    }, 10000); // 10 seconds
+    }, 10000);
 }
 
 module.exports = monitorAds; 
