@@ -49,15 +49,16 @@ function parseAd(ad, trackedItemId) {
     ad.find('.ad_side_right .ad_item_img').each((i, el) => {
         const img = ad.find('.ad_side_right .ad_item_img').eq(i);
         const alt = img.attr('alt');
-        const src = img.attr('src');
+        const src = img.attr('data-src') || img.attr('src');
         const title = img.attr('data-original-title') || '';
         const onclick = img.attr('onclick') || '';
-        if (src && !src.includes('empty_trade_slot') && alt !== 'Request Slot Thumbnail') {
+        // Always try to extract item ID from onclick, regardless of image src
+        if (alt !== 'Request Slot Thumbnail') {
             requestItems.push({
                 name: title.split('<br>')[0] || alt,
                 value: (title.match(/Value ([\d,]+)/) || [])[1] || '',
                 rap: (title.match(/RAP ([\d,]+)/) || [])[1] || '',
-                img: src.startsWith('http') ? src : `https://www.rolimons.com${src}`,
+                img: src && src.startsWith('http') ? src : `https://www.rolimons.com${src}`,
                 title,
                 onclick,
                 id: (onclick.match(/item_select_handler\((\d+),/) || [])[1] || ''
