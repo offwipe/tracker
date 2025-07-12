@@ -110,7 +110,14 @@ async function fetchAllRequestAds(itemId) {
     let browser, page, html;
     try {
         browser = await puppeteer.launch({
-            args: ['--no-sandbox', '--disable-setuid-sandbox'],
+            args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-gpu',
+                '--single-process',
+                '--no-zygote'
+            ],
             headless: true
         });
         page = await browser.newPage();
@@ -119,15 +126,12 @@ async function fetchAllRequestAds(itemId) {
         await page.waitForSelector('.mix_item', { timeout: 10000 });
         // Try to click or remove cookie/privacy popups
         await page.evaluate(() => {
-            // Click accept/close buttons if present
             const btns = Array.from(document.querySelectorAll('button, [role="button"]'));
             btns.forEach(btn => {
                 if (/accept|close|agree|dismiss|consent/i.test(btn.textContent)) btn.click();
             });
-            // Remove banners/popups by id/class/text
             const banners = document.querySelectorAll('[id*="consent"], [id*="cookie"], [class*="cookie"], [class*="consent"], [class*="privacy"], .qc-cmp2-container, .qc-cmp2-summary, .qc-cmp2-footer, .qc-cmp2-main, .qc-cmp2-ui, .qc-cmp2-persistent-link, .qc-cmp2-dialog, .qc-cmp2-custom-popup, .qc-cmp2-overlay, .qc-cmp2-banner, .qc-cmp2-summary-info, .qc-cmp2-summary-buttons');
             banners.forEach(b => b.remove());
-            // Remove elements containing privacy/cookie text
             Array.from(document.querySelectorAll('div, span, p')).forEach(el => {
                 if (/privacy|cookie/i.test(el.textContent)) el.remove();
             });
@@ -135,6 +139,9 @@ async function fetchAllRequestAds(itemId) {
         html = await page.content();
     } catch (err) {
         console.error(`[AdMonitor][Puppeteer] Error loading page for item ${itemId}:`, err);
+        if (err.message && err.message.includes('Failed to launch the browser process')) {
+            console.error('[AdMonitor][Puppeteer] Try upgrading your Railway plan, or use a platform with more resources for headless browsers.');
+        }
         if (browser) await browser.close();
         return [];
     }
@@ -155,7 +162,14 @@ async function getTradeAdScreenshot(itemId, adElemIndex) {
     let browser, page, buffer = null;
     try {
         browser = await puppeteer.launch({
-            args: ['--no-sandbox', '--disable-setuid-sandbox'],
+            args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-gpu',
+                '--single-process',
+                '--no-zygote'
+            ],
             headless: true
         });
         page = await browser.newPage();
@@ -180,6 +194,9 @@ async function getTradeAdScreenshot(itemId, adElemIndex) {
         }
     } catch (err) {
         console.error(`[AdMonitor][Puppeteer] Error taking screenshot for item ${itemId}:`, err);
+        if (err.message && err.message.includes('Failed to launch the browser process')) {
+            console.error('[AdMonitor][Puppeteer] Try upgrading your Railway plan, or use a platform with more resources for headless browsers.');
+        }
     }
     if (browser) await browser.close();
     return buffer;
