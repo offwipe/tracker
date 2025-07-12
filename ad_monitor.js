@@ -48,7 +48,9 @@ function parseAd(ad, trackedItemId) {
         const onclick = img.attr('onclick') || '';
         
         // Less strict image filtering - if it has onclick, it's likely a real item
-        const isPlaceholder = PLACEHOLDER_IMAGES.includes(src) || PLACEHOLDER_IMAGES.includes(img.attr('src')) || PLACEHOLDER_IMAGES.includes(img.attr('data-src'));
+        // Check data-src for placeholders since that's where the actual image URL is
+        const dataSrc = img.attr('data-src');
+        const isPlaceholder = dataSrc && PLACEHOLDER_IMAGES.includes(dataSrc);
         const hasValidOnclick = onclick && onclick.includes('item_select_handler');
         
         if (!isPlaceholder && (hasValidOnclick || (src && src.startsWith('https://tr.rbxcdn.com')))) {
@@ -75,10 +77,18 @@ function parseAd(ad, trackedItemId) {
         const onclick = img.attr('onclick') || '';
         
         // Less strict image filtering - if it has onclick, it's likely a real item
-        const isPlaceholder = PLACEHOLDER_IMAGES.includes(src) || PLACEHOLDER_IMAGES.includes(img.attr('src')) || PLACEHOLDER_IMAGES.includes(img.attr('data-src'));
+        // Check data-src for placeholders since that's where the actual image URL is
+        const dataSrc = img.attr('data-src');
+        const isPlaceholder = dataSrc && PLACEHOLDER_IMAGES.includes(dataSrc);
         const hasValidOnclick = onclick && onclick.includes('item_select_handler');
         
+        // Debug logging for first few items
+        if (i < 3) {
+            console.log(`[AdMonitor][DEBUG] Request item ${i}: onclick="${onclick}", dataSrc="${dataSrc}", isPlaceholder=${isPlaceholder}, hasValidOnclick=${hasValidOnclick}`);
+        }
+        
         if (hasValidOnclick && !isPlaceholder) {
+            const itemId = (onclick.match(/item_select_handler\((\d+),/) || [])[1] || '';
             requestItems.push({
                 name: title.split('<br>')[0] || alt,
                 value: (title.match(/Value ([\d,]+)/) || [])[1] || '',
@@ -86,12 +96,25 @@ function parseAd(ad, trackedItemId) {
                 img: src.startsWith('http') ? src : `https://www.rolimons.com${src}`,
                 title,
                 onclick,
-                id: (onclick.match(/item_select_handler\((\d+),/) || [])[1] || ''
+                id: itemId
             });
+            
+            // Debug logging for added items
+            if (i < 3) {
+                console.log(`[AdMonitor][DEBUG] Added request item: id=${itemId}, name="${title.split('<br>')[0] || alt}"`);
+            }
         }
     });
     // Find the tracked item on the request side
     const trackedItem = requestItems.find(i => i.id === trackedItemId) || requestItems.find(i => i.onclick && i.onclick.includes(trackedItemId));
+    
+    // Debug logging for tracked item
+    if (trackedItem) {
+        console.log(`[AdMonitor][DEBUG] Found tracked item: id=${trackedItem.id}, name="${trackedItem.name}"`);
+    } else {
+        console.log(`[AdMonitor][DEBUG] Tracked item ${trackedItemId} not found in request items. Available items: ${requestItems.map(i => i.id).join(', ')}`);
+    }
+    
     // Request value/RAP (now only for tracked item)
     const trackedItemValue = trackedItem && trackedItem.value ? parseInt(trackedItem.value.replace(/,/g, '')) : null;
     const trackedItemRAP = trackedItem && trackedItem.rap ? parseInt(trackedItem.rap.replace(/,/g, '')) : null;
@@ -275,7 +298,10 @@ async function monitorAds(client) {
                 for (const ad of ads) {
                     // Check if the tracked item is on the request side (string-to-string)
                     const match = ad.requestItems.some(img => String(img.id) === String(item_id));
-                    if (!match) continue;
+                    if (!match) {
+                        console.log(`[AdMonitor][DEBUG] Ad skipped - tracked item ${item_id} not found in request items: ${ad.requestItems.map(i => i.id).join(', ')}`);
+                        continue;
+                    }
                     
                     // Filter out ads older than bot startup time
                     let adTime = parseAdTime(ad.time);
@@ -288,6 +314,7 @@ async function monitorAds(client) {
                     if (tracking_started_at && adTime) {
                         const startTime = new Date(tracking_started_at);
                         if (adTime < startTime) {
+                            console.log(`[AdMonitor] Skipping ad older than tracking start: ${ad.time} < ${startTime}`);
                             continue;
                         }
                     }
@@ -304,8 +331,11 @@ async function monitorAds(client) {
                     foundMatch = true;
                     // Prevent duplicate posts (in-memory and DB)
                     if (ad.adId === last_ad_id || postedAdIds.has(ad.adId)) {
+                        console.log(`[AdMonitor] Skipping duplicate ad ID: ${ad.adId}`);
                         continue;
                     }
+                    
+                    console.log(`[AdMonitor] Posting new ad for item ${item_id} from user ${ad.username}`);
                     
                     // Update user duplicate cache
                     userDuplicateCache.set(userDuplicateKey, now);
