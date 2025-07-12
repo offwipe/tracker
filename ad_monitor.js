@@ -13,6 +13,10 @@ const PLACEHOLDER_IMAGES = [
 
 // In-memory cache to prevent rapid duplicate posts (reset on restart)
 const postedAdIds = new Set();
+// Track bot startup time to filter out old ads
+const botStartupTime = new Date();
+// Track user duplicate ads (user + item combination within 1 hour)
+const userDuplicateCache = new Map(); // key: `${username}-${itemId}`, value: timestamp
 
 function parseAd(ad, trackedItemId) {
     // Username and profile
@@ -41,11 +45,13 @@ function parseAd(ad, trackedItemId) {
         const alt = img.attr('alt');
         const src = img.attr('data-src') || img.attr('src');
         const title = img.attr('data-original-title') || '';
-        // Enhanced blank/placeholder image filtering
-        const isPlaceholder = !src || PLACEHOLDER_IMAGES.includes(src) || PLACEHOLDER_IMAGES.includes(img.attr('src')) || PLACEHOLDER_IMAGES.includes(img.attr('data-src'));
-        const isBlank = !src || src === '' || src === '#' || src === '/';
-        const isValidImg = src && (src.startsWith('http') || src.startsWith('https://tr.rbxcdn.com'));
-        if (!isPlaceholder && !isBlank && isValidImg) {
+        const onclick = img.attr('onclick') || '';
+        
+        // Less strict image filtering - if it has onclick, it's likely a real item
+        const isPlaceholder = PLACEHOLDER_IMAGES.includes(src) || PLACEHOLDER_IMAGES.includes(img.attr('src')) || PLACEHOLDER_IMAGES.includes(img.attr('data-src'));
+        const hasValidOnclick = onclick && onclick.includes('item_select_handler');
+        
+        if (!isPlaceholder && (hasValidOnclick || (src && src.startsWith('https://tr.rbxcdn.com')))) {
             const match = title.match(/^(.*?)<br>Value ([\d,]+)/);
             offerItems.push({
                 name: match ? match[1] : alt,
@@ -67,11 +73,12 @@ function parseAd(ad, trackedItemId) {
         const src = img.attr('data-src') || img.attr('src');
         const title = img.attr('data-original-title') || '';
         const onclick = img.attr('onclick') || '';
-        // Enhanced blank/placeholder image filtering
-        const isPlaceholder = !src || PLACEHOLDER_IMAGES.includes(src) || PLACEHOLDER_IMAGES.includes(img.attr('src')) || PLACEHOLDER_IMAGES.includes(img.attr('data-src'));
-        const isBlank = !src || src === '' || src === '#' || src === '/';
-        const isValidImg = src && (src.startsWith('http') || src.startsWith('https://tr.rbxcdn.com'));
-        if (onclick && !isPlaceholder && !isBlank && isValidImg) {
+        
+        // Less strict image filtering - if it has onclick, it's likely a real item
+        const isPlaceholder = PLACEHOLDER_IMAGES.includes(src) || PLACEHOLDER_IMAGES.includes(img.attr('src')) || PLACEHOLDER_IMAGES.includes(img.attr('data-src'));
+        const hasValidOnclick = onclick && onclick.includes('item_select_handler');
+        
+        if (hasValidOnclick && !isPlaceholder) {
             requestItems.push({
                 name: title.split('<br>')[0] || alt,
                 value: (title.match(/Value ([\d,]+)/) || [])[1] || '',
@@ -269,20 +276,41 @@ async function monitorAds(client) {
                     // Check if the tracked item is on the request side (string-to-string)
                     const match = ad.requestItems.some(img => String(img.id) === String(item_id));
                     if (!match) continue;
-                    // Only post ads newer than tracking_started_at
+                    
+                    // Filter out ads older than bot startup time
                     let adTime = parseAdTime(ad.time);
+                    if (adTime && adTime < botStartupTime) {
+                        console.log(`[AdMonitor] Skipping ad older than bot startup: ${ad.time}`);
+                        continue;
+                    }
+                    
+                    // Only post ads newer than tracking_started_at
                     if (tracking_started_at && adTime) {
                         const startTime = new Date(tracking_started_at);
                         if (adTime < startTime) {
                             continue;
                         }
                     }
+                    
+                    // Check for user duplicate ads (same user + item within 1 hour)
+                    const userDuplicateKey = `${ad.username}-${item_id}`;
+                    const now = new Date();
+                    const lastUserAdTime = userDuplicateCache.get(userDuplicateKey);
+                    if (lastUserAdTime && (now.getTime() - lastUserAdTime.getTime()) < 3600000) { // 1 hour
+                        console.log(`[AdMonitor] Skipping duplicate ad from user ${ad.username} for item ${item_id} within 1 hour`);
+                        continue;
+                    }
+                    
                     foundMatch = true;
                     // Prevent duplicate posts (in-memory and DB)
                     if (ad.adId === last_ad_id || postedAdIds.has(ad.adId)) {
                         continue;
                     }
+                    
+                    // Update user duplicate cache
+                    userDuplicateCache.set(userDuplicateKey, now);
                     postedAdIds.add(ad.adId);
+                    
                     const channel = await client.channels.fetch(channel_id).catch(() => null);
                     if (!channel) continue;
 
