@@ -158,6 +158,9 @@ async function fetchAllRequestAds(itemId) {
         }
         const ad = parseAd(adElem, itemId);
         const adId = ad.detailsUrl || Buffer.from(adElem.html()).toString('base64');
+        // Log all request-side item IDs for every ad
+        const requestItemIds = ad.requestItems.map(img => String(img.id));
+        console.log(`[AdMonitor][DEBUG] (ad #${i}) Tracked item ID: ${String(itemId)}, Request side item IDs: ${JSON.stringify(requestItemIds)}`);
         ads.push({ ...ad, adId, url, adElemIndex: i });
     });
     return ads;
@@ -227,13 +230,8 @@ async function monitorAds(client) {
                 }
                 let foundMatch = false;
                 for (const ad of ads) {
-                    // Log all request-side item IDs for this ad
-                    const requestItemIds = ad.requestItems.map(img => img.id);
-                    console.log(`[AdMonitor][DEBUG] Tracked item ID: ${item_id}, Request side item IDs: ${JSON.stringify(requestItemIds)}`);
-                    // Check if the tracked item is on the request side
-                    const match = ad.requestItems.some(img => {
-                        return (img.id === item_id) || (img.onclick && img.onclick.includes(item_id));
-                    });
+                    // Check if the tracked item is on the request side (string-to-string)
+                    const match = ad.requestItems.some(img => String(img.id) === String(item_id));
                     if (!match) continue;
                     foundMatch = true;
                     if (ad.adId === last_ad_id) {
