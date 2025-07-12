@@ -41,7 +41,11 @@ function parseAd(ad, trackedItemId) {
         const alt = img.attr('alt');
         const src = img.attr('data-src') || img.attr('src');
         const title = img.attr('data-original-title') || '';
-        if (src && !PLACEHOLDER_IMAGES.includes(src)) {
+        // Enhanced blank/placeholder image filtering
+        const isPlaceholder = !src || PLACEHOLDER_IMAGES.includes(src) || PLACEHOLDER_IMAGES.includes(img.attr('src')) || PLACEHOLDER_IMAGES.includes(img.attr('data-src'));
+        const isBlank = !src || src === '' || src === '#' || src === '/';
+        const isValidImg = src && (src.startsWith('http') || src.startsWith('https://tr.rbxcdn.com'));
+        if (!isPlaceholder && !isBlank && isValidImg) {
             const match = title.match(/^(.*?)<br>Value ([\d,]+)/);
             offerItems.push({
                 name: match ? match[1] : alt,
@@ -63,7 +67,11 @@ function parseAd(ad, trackedItemId) {
         const src = img.attr('data-src') || img.attr('src');
         const title = img.attr('data-original-title') || '';
         const onclick = img.attr('onclick') || '';
-        if (onclick && src && !PLACEHOLDER_IMAGES.includes(src)) {
+        // Enhanced blank/placeholder image filtering
+        const isPlaceholder = !src || PLACEHOLDER_IMAGES.includes(src) || PLACEHOLDER_IMAGES.includes(img.attr('src')) || PLACEHOLDER_IMAGES.includes(img.attr('data-src'));
+        const isBlank = !src || src === '' || src === '#' || src === '/';
+        const isValidImg = src && (src.startsWith('http') || src.startsWith('https://tr.rbxcdn.com'));
+        if (onclick && !isPlaceholder && !isBlank && isValidImg) {
             requestItems.push({
                 name: title.split('<br>')[0] || alt,
                 value: (title.match(/Value ([\d,]+)/) || [])[1] || '',
@@ -75,13 +83,14 @@ function parseAd(ad, trackedItemId) {
             });
         }
     });
-    // Request value/RAP
-    const requestValue = parseInt(ad.find('.ad_side_right .stat_value').first().text().replace(/,/g, '')) || 0;
-    const requestRAP = parseInt(ad.find('.ad_side_right .stat_rap').first().text().replace(/,/g, '')) || 0;
-
-    // Value and RAP difference
-    const valueDiff = offerValue && requestValue ? offerValue - requestValue : null;
-    const rapDiff = offerRAP && requestRAP ? offerRAP - requestRAP : null;
+    // Find the tracked item on the request side
+    const trackedItem = requestItems.find(i => i.id === trackedItemId) || requestItems.find(i => i.onclick && i.onclick.includes(trackedItemId));
+    // Request value/RAP (now only for tracked item)
+    const trackedItemValue = trackedItem && trackedItem.value ? parseInt(trackedItem.value.replace(/,/g, '')) : null;
+    const trackedItemRAP = trackedItem && trackedItem.rap ? parseInt(trackedItem.rap.replace(/,/g, '')) : null;
+    // Value and RAP difference (use only tracked item from request side)
+    const valueDiff = (offerValue && trackedItemValue !== null) ? offerValue - trackedItemValue : null;
+    const rapDiff = (offerRAP && trackedItemRAP !== null) ? offerRAP - trackedItemRAP : null;
 
     // Trade ads created (not always available)
     let adsCreated = null;
@@ -93,7 +102,7 @@ function parseAd(ad, trackedItemId) {
     let userTotalValue = offerValue || null;
 
     // Find the tracked item name on the request side
-    const trackedItem = requestItems.find(i => i.id === trackedItemId) || requestItems.find(i => i.onclick && i.onclick.includes(trackedItemId));
+    const trackedItemName = trackedItem ? trackedItem.name : 'Unknown';
 
     return {
         username,
@@ -106,13 +115,13 @@ function parseAd(ad, trackedItemId) {
         offerValue,
         offerRAP,
         requestItems,
-        requestValue,
-        requestRAP,
+        requestValue: trackedItemValue,
+        requestRAP: trackedItemRAP,
         valueDiff,
         rapDiff,
         adsCreated,
         userTotalValue,
-        trackedItemName: trackedItem ? trackedItem.name : 'Unknown'
+        trackedItemName
     };
 }
 
