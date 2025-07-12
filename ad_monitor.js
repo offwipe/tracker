@@ -3,12 +3,14 @@ const puppeteer = require('puppeteer');
 const cheerio = require('cheerio');
 const db = require('./db');
 
-function parseAd(ad) {
+function parseAd(ad, trackedItemId) {
     // Username and profile
     const userAnchor = ad.find('.ad_creator_name');
     const username = userAnchor.text().trim();
     const profilePath = userAnchor.attr('href');
     const profileUrl = profilePath ? `https://www.rolimons.com${profilePath}` : null;
+    // User profile image
+    const userImg = ad.find('.ad_creator_pfp').attr('src') || null;
     // Time
     const time = ad.find('.trade-ad-timestamp').text().trim();
     // Trade details link
@@ -17,7 +19,7 @@ function parseAd(ad) {
     const detailsUrl = detailsPath ? `https://www.rolimons.com${detailsPath}` : null;
     // Send trade link
     const sendTradeAnchor = ad.find('.send_trade_button').filter(function() {
-        return !ad.find('.send_trade_button').eq(0).attr('onclick'); // Exclude 'Remove' button
+        return !ad.find('.send_trade_button').eq(0).attr('onclick');
     });
     const sendTradeUrl = sendTradeAnchor.attr('href');
 
@@ -33,13 +35,14 @@ function parseAd(ad) {
             offerItems.push({
                 name: match ? match[1] : alt,
                 value: match ? match[2] : '',
+                rap: (title.match(/RAP ([\d,]+)/) || [])[1] || '',
                 img: src.startsWith('http') ? src : `https://www.rolimons.com${src}`
             });
         }
     });
     // Offer value/RAP
-    const offerValue = ad.find('.ad_side_left .stat_value').first().text().trim();
-    const offerRAP = ad.find('.ad_side_left .stat_rap').first().text().trim();
+    const offerValue = parseInt(ad.find('.ad_side_left .stat_value').first().text().replace(/,/g, '')) || 0;
+    const offerRAP = parseInt(ad.find('.ad_side_left .stat_rap').first().text().replace(/,/g, '')) || 0;
 
     // Request items
     const requestItems = [];
@@ -53,35 +56,38 @@ function parseAd(ad) {
             requestItems.push({
                 name: title.split('<br>')[0] || alt,
                 value: (title.match(/Value ([\d,]+)/) || [])[1] || '',
+                rap: (title.match(/RAP ([\d,]+)/) || [])[1] || '',
                 img: src.startsWith('http') ? src : `https://www.rolimons.com${src}`,
                 title,
-                onclick
+                onclick,
+                id: (onclick.match(/item_select_handler\((\d+),/) || [])[1] || ''
             });
         }
     });
     // Request value/RAP
-    const requestValue = ad.find('.ad_side_right .stat_value').first().text().trim();
-    const requestRAP = ad.find('.ad_side_right .stat_rap').first().text().trim();
+    const requestValue = parseInt(ad.find('.ad_side_right .stat_value').first().text().replace(/,/g, '')) || 0;
+    const requestRAP = parseInt(ad.find('.ad_side_right .stat_rap').first().text().replace(/,/g, '')) || 0;
 
-    // Value difference and RAP difference (try to parse from ad details if present)
-    let valueDiff = null, rapDiff = null;
-    const diffText = ad.text();
-    const valueDiffMatch = diffText.match(/([+-]?[\d,.]+) ?k? ?\(.*a\/t\)/i) || diffText.match(/([+-]?[\d,.]+) ?k? ?value difference/i);
-    if (valueDiffMatch) valueDiff = valueDiffMatch[1];
-    const rapDiffMatch = diffText.match(/RAP Difference\s*([+-]?[\d,.]+)/i);
-    if (rapDiffMatch) rapDiff = rapDiffMatch[1];
+    // Value and RAP difference
+    const valueDiff = offerValue && requestValue ? offerValue - requestValue : null;
+    const rapDiff = offerRAP && requestRAP ? offerRAP - requestRAP : null;
 
     // Trade ads created (not always available)
     let adsCreated = null;
+    const diffText = ad.text();
     const adsCreatedMatch = diffText.match(/Ads Created\s*(\d+)/i);
     if (adsCreatedMatch) adsCreated = adsCreatedMatch[1];
 
     // User total value (try to parse from left side value)
     let userTotalValue = offerValue || null;
 
+    // Find the tracked item name on the request side
+    const trackedItem = requestItems.find(i => i.id === trackedItemId) || requestItems.find(i => i.onclick && i.onclick.includes(trackedItemId));
+
     return {
         username,
         profileUrl,
+        userImg,
         time,
         detailsUrl,
         sendTradeUrl,
@@ -94,7 +100,8 @@ function parseAd(ad) {
         valueDiff,
         rapDiff,
         adsCreated,
-        userTotalValue
+        userTotalValue,
+        trackedItemName: trackedItem ? trackedItem.name : 'Unknown'
     };
 }
 
@@ -110,6 +117,21 @@ async function fetchAllRequestAds(itemId) {
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
         await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
         await page.waitForSelector('.mix_item', { timeout: 10000 });
+        // Try to click or remove cookie/privacy popups
+        await page.evaluate(() => {
+            // Click accept/close buttons if present
+            const btns = Array.from(document.querySelectorAll('button, [role="button"]'));
+            btns.forEach(btn => {
+                if (/accept|close|agree|dismiss|consent/i.test(btn.textContent)) btn.click();
+            });
+            // Remove banners/popups by id/class/text
+            const banners = document.querySelectorAll('[id*="consent"], [id*="cookie"], [class*="cookie"], [class*="consent"], [class*="privacy"], .qc-cmp2-container, .qc-cmp2-summary, .qc-cmp2-footer, .qc-cmp2-main, .qc-cmp2-ui, .qc-cmp2-persistent-link, .qc-cmp2-dialog, .qc-cmp2-custom-popup, .qc-cmp2-overlay, .qc-cmp2-banner, .qc-cmp2-summary-info, .qc-cmp2-summary-buttons');
+            banners.forEach(b => b.remove());
+            // Remove elements containing privacy/cookie text
+            Array.from(document.querySelectorAll('div, span, p')).forEach(el => {
+                if (/privacy|cookie/i.test(el.textContent)) el.remove();
+            });
+        });
         html = await page.content();
     } catch (err) {
         console.error(`[AdMonitor][Puppeteer] Error loading page for item ${itemId}:`, err);
@@ -121,7 +143,7 @@ async function fetchAllRequestAds(itemId) {
     const ads = [];
     $('.mix_item').each((i, el) => {
         const adElem = $(el);
-        const ad = parseAd(adElem);
+        const ad = parseAd(adElem, itemId);
         const adId = ad.detailsUrl || Buffer.from(adElem.html()).toString('base64');
         ads.push({ ...ad, adId, url, adElemIndex: i });
     });
@@ -140,12 +162,17 @@ async function getTradeAdScreenshot(itemId, adElemIndex) {
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
         await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
         await page.waitForSelector('.mix_item', { timeout: 10000 });
-        // Hide cookie/privacy banner if present
+        // Try to click or remove cookie/privacy popups
         await page.evaluate(() => {
-            const banners = document.querySelectorAll('[id*="consent"], .qc-cmp2-container, .qc-cmp2-summary, .qc-cmp2-footer, .qc-cmp2-main, .qc-cmp2-ui, .qc-cmp2-persistent-link, .qc-cmp2-dialog, .qc-cmp2-custom-popup, .qc-cmp2-overlay, .qc-cmp2-banner, .qc-cmp2-summary-info, .qc-cmp2-summary-buttons, .qc-cmp2-summary-info, .qc-cmp2-summary-buttons, .qc-cmp2-summary, .qc-cmp2-footer, .qc-cmp2-main, .qc-cmp2-ui, .qc-cmp2-persistent-link, .qc-cmp2-dialog, .qc-cmp2-custom-popup, .qc-cmp2-overlay, .qc-cmp2-banner, .qc-cmp2-summary-info, .qc-cmp2-summary-buttons');
-            banners.forEach(b => b.style.display = 'none');
-            const privacy = document.querySelector('div[role="dialog"], .truste_overlay, .truste_box, .truste_box_overlay, .truste_box_content, .truste_box_buttons, .truste_box_links, .truste_box_title, .truste_box_message, .truste_box_close, .truste_box_accept, .truste_box_reject, .truste_box_settings, .truste_box_more, .truste_box_less, .truste_box_policy, .truste_box_policy_link, .truste_box_policy_text, .truste_box_policy_title, .truste_box_policy_message, .truste_box_policy_accept, .truste_box_policy_reject, .truste_box_policy_settings, .truste_box_policy_more, .truste_box_policy_less, .truste_box_policy_policy, .truste_box_policy_policy_link, .truste_box_policy_policy_text, .truste_box_policy_policy_title, .truste_box_policy_policy_message, .truste_box_policy_policy_accept, .truste_box_policy_policy_reject, .truste_box_policy_policy_settings, .truste_box_policy_policy_more, .truste_box_policy_policy_less');
-            if (privacy) privacy.style.display = 'none';
+            const btns = Array.from(document.querySelectorAll('button, [role="button"]'));
+            btns.forEach(btn => {
+                if (/accept|close|agree|dismiss|consent/i.test(btn.textContent)) btn.click();
+            });
+            const banners = document.querySelectorAll('[id*="consent"], [id*="cookie"], [class*="cookie"], [class*="consent"], [class*="privacy"], .qc-cmp2-container, .qc-cmp2-summary, .qc-cmp2-footer, .qc-cmp2-main, .qc-cmp2-ui, .qc-cmp2-persistent-link, .qc-cmp2-dialog, .qc-cmp2-custom-popup, .qc-cmp2-overlay, .qc-cmp2-banner, .qc-cmp2-summary-info, .qc-cmp2-summary-buttons');
+            banners.forEach(b => b.remove());
+            Array.from(document.querySelectorAll('div, span, p')).forEach(el => {
+                if (/privacy|cookie/i.test(el.textContent)) el.remove();
+            });
         });
         const adHandles = await page.$$('.mix_item');
         if (adHandles[adElemIndex]) {
@@ -179,7 +206,7 @@ async function monitorAds(client) {
                 for (const ad of ads) {
                     // Check if the tracked item is on the request side
                     const match = ad.requestItems.some(img => {
-                        return (img.onclick && img.onclick.includes(item_id)) || (img.title && img.title.includes(item_id));
+                        return (img.id === item_id) || (img.onclick && img.onclick.includes(item_id));
                     });
                     if (!match) continue;
                     foundMatch = true;
@@ -202,11 +229,8 @@ async function monitorAds(client) {
 
                     // Determine embed color based on value difference
                     let embedColor = 0x2ecc40; // green by default
-                    if (ad.valueDiff) {
-                        const num = parseFloat(ad.valueDiff.replace(/,/g, ''));
-                        if (!isNaN(num)) {
-                            embedColor = num >= 0 ? 0x2ecc40 : 0xe74c3c; // green or red
-                        }
+                    if (ad.valueDiff !== null) {
+                        embedColor = ad.valueDiff >= 0 ? 0x2ecc40 : 0xe74c3c;
                     }
 
                     // Build embed with improved formatting
@@ -215,20 +239,20 @@ async function monitorAds(client) {
                         .setURL(ad.sendTradeUrl || ad.profileUrl)
                         .setColor(embedColor)
                         .addFields(
-                            { name: 'Item', value: ad.requestItems.find(i => i.onclick && i.onclick.includes(item_id))?.name || 'Unknown', inline: true },
+                            { name: 'Item', value: ad.trackedItemName || 'Unknown', inline: true },
                             { name: 'Rolimon\'s Profile', value: `[View Profile](${ad.profileUrl})`, inline: true },
                             { name: 'Roblox Trade Link', value: ad.sendTradeUrl ? `[Send Trade](${ad.sendTradeUrl})` : 'N/A', inline: true },
                             { name: 'Trade Ads Created', value: ad.adsCreated || 'N/A', inline: true },
-                            { name: 'User Total Value', value: ad.userTotalValue || 'N/A', inline: true },
-                            { name: 'Value Difference', value: ad.valueDiff || 'N/A', inline: true },
-                            { name: 'RAP Difference', value: ad.rapDiff || 'N/A', inline: true },
+                            { name: 'User Total Value', value: ad.userTotalValue !== null ? ad.userTotalValue.toLocaleString() : 'N/A', inline: true },
+                            { name: 'Value Difference', value: ad.valueDiff !== null ? (ad.valueDiff > 0 ? '+' : '') + ad.valueDiff.toLocaleString() : 'N/A', inline: true },
+                            { name: 'RAP Difference', value: ad.rapDiff !== null ? (ad.rapDiff > 0 ? '+' : '') + ad.rapDiff.toLocaleString() : 'N/A', inline: true },
                             { name: 'Offered', value: ad.offerItems.map(i => i.name).join(', ') || 'None', inline: false },
                             { name: 'Requested', value: ad.requestItems.map(i => i.name).join(', ') || 'None', inline: false }
                         )
                         .setFooter({ text: 'Rolimon\'s Trade Monitor' })
                         .setTimestamp();
-                    if (ad.offerItems[0] && ad.offerItems[0].img) {
-                        embed.setThumbnail(ad.offerItems[0].img);
+                    if (ad.userImg) {
+                        embed.setThumbnail(ad.userImg);
                     }
                     if (attachment) {
                         await channel.send({
