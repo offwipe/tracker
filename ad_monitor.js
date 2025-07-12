@@ -82,7 +82,10 @@ async function fetchAllRequestAds(itemId) {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
     });
-    const $ = cheerio.load(response.data);
+    const html = response.data;
+    // Debug: print the first 1000 characters of the HTML
+    console.log(`[AdMonitor][DEBUG] First 1000 chars of HTML for item ${itemId}:\n${html.slice(0, 1000)}`);
+    const $ = cheerio.load(html);
     // Find all .mix_item (ads)
     const ads = [];
     $('.mix_item').each((i, el) => {
