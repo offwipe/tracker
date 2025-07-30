@@ -112,10 +112,12 @@ function parseAd(ad, trackedItemId) {
         
         if (hasValidOnclick && !isPlaceholder) {
             const itemId = (onclick.match(/item_select_handler\((\d+),/) || [])[1] || '';
+            const valueMatch = title.match(/Value ([\d,]+)/);
+            const rapMatch = title.match(/RAP ([\d,]+)/);
             requestItems.push({
                 name: title.split('<br>')[0] || alt,
-                value: (title.match(/Value ([\d,]+)/) || [])[1] || '',
-                rap: (title.match(/RAP ([\d,]+)/) || [])[1] || '',
+                value: valueMatch ? valueMatch[1] : '',
+                rap: rapMatch ? rapMatch[1] : '',
                 img: src.startsWith('http') ? src : `https://www.rolimons.com${src}`,
                 title,
                 onclick,
@@ -353,17 +355,51 @@ function parseAdTime(adTimeStr) {
     // Try to parse "x minutes ago", "x seconds ago", or ISO string
     if (!adTimeStr) return null;
     adTimeStr = adTimeStr.trim();
+    
     if (/ago$/.test(adTimeStr)) {
         const now = new Date();
-        const min = adTimeStr.match(/(\d+)\s*minute/);
-        const sec = adTimeStr.match(/(\d+)\s*second/);
-        if (min) return new Date(now.getTime() - parseInt(min[1]) * 60000);
-        if (sec) return new Date(now.getTime() - parseInt(sec[1]) * 1000);
-        return now;
+        const hourMatch = adTimeStr.match(/(\d+)\s*hour/);
+        const minMatch = adTimeStr.match(/(\d+)\s*minute/);
+        const secMatch = adTimeStr.match(/(\d+)\s*second/);
+        
+        // Reject hours - too old
+        if (hourMatch) {
+            return null;
+        }
+        
+        // Reject minutes over 2
+        if (minMatch) {
+            const minutes = parseInt(minMatch[1]);
+            if (minutes > 2) {
+                return null;
+            }
+            return new Date(now.getTime() - minutes * 60000);
+        }
+        
+        // Accept any seconds timestamp (auto-accept for freshness)
+        if (secMatch) {
+            const seconds = parseInt(secMatch[1]);
+            return new Date(now.getTime() - seconds * 1000);
+        }
+        
+        // If it ends with "ago" but doesn't match our patterns, reject it
+        return null;
     }
-    // Try to parse as ISO or date string
+    
+    // Try to parse as ISO or date string, but be very strict
     const parsed = new Date(adTimeStr);
-    return isNaN(parsed) ? null : parsed;
+    if (isNaN(parsed)) {
+        return null;
+    }
+    
+    // Reject dates that are too old (more than 2 minutes)
+    const now = new Date();
+    const twoMinutesAgo = new Date(now.getTime() - 2 * 60 * 1000);
+    if (parsed < twoMinutesAgo) {
+        return null;
+    }
+    
+    return parsed;
 }
 
 async function monitorAds(client) {
@@ -399,11 +435,49 @@ async function monitorAds(client) {
                         continue;
                     }
                     
+                    // Skip ads without valid time since we can't filter them
+                    if (!adTime) {
+                        log(`Skipping ad without valid time: "${ad.time}"`);
+                        continue;
+                    }
+                    
+                    // Hard limit: Skip ads older than 2 minutes
+                    const currentTime = new Date();
+                    const twoMinutesAgo = new Date(currentTime.getTime() - 2 * 60 * 1000);
+                    if (adTime < twoMinutesAgo) {
+                        log(`Skipping ad older than 2 minutes: ${ad.time}`);
+                        continue;
+                    }
+                    
+                    // Additional filtering based on raw time text
+                    if (ad.time) {
+                        const timeText = ad.time.toLowerCase();
+                        
+                        // Skip any ads with "hour" or "hours" in the timestamp
+                        if (timeText.includes('hour') || timeText.includes('hours')) {
+                            log(`Skipping ad with hour-old timestamp: ${ad.time}`);
+                            continue;
+                        }
+                        // Skip ads with minutes > 2
+                        else if (timeText.includes('minute')) {
+                            const minuteMatch = timeText.match(/(\d+)\s*minute/);
+                            if (minuteMatch && parseInt(minuteMatch[1]) > 2) {
+                                log(`Skipping ad with old minute timestamp: ${ad.time} (${minuteMatch[1]} minutes > 2)`);
+                                continue;
+                            }
+                        }
+                        // Skip ads with "day" or "days" in timestamp
+                        else if (timeText.includes('day') || timeText.includes('days')) {
+                            log(`Skipping ad with day-old timestamp: ${ad.time}`);
+                            continue;
+                        }
+                    }
+                    
                     // Only post ads newer than tracking_started_at
                     if (tracking_started_at && adTime) {
                         const startTime = new Date(tracking_started_at);
                         if (adTime < startTime) {
-                            log(`Skipping ad older than tracking start: ${ad.time} < ${startTime}`);
+                            log(`Skipping ad older than tracking start: ${ad.time}`);
                             continue;
                         }
                     }
