@@ -359,7 +359,19 @@ async function getTradeAdScreenshot(adElemIndex) {
         
         const adHandles = await page.$$('.mix_item');
         if (adHandles[adElemIndex]) {
-            buffer = await adHandles[adElemIndex].screenshot({ encoding: 'binary', type: 'png' });
+            // Scroll to the specific ad to ensure it's visible
+            await adHandles[adElemIndex].scrollIntoView();
+            await page.waitForTimeout(1000); // Wait for any animations
+            buffer = await adHandles[adElemIndex].screenshot({ 
+                encoding: 'binary', 
+                type: 'png',
+                clip: {
+                    x: 0,
+                    y: 0,
+                    width: 800,
+                    height: 600
+                }
+            });
         }
     } catch (err) {
         console.error(`[AdMonitor][Puppeteer] Error taking screenshot for ad ${adElemIndex}:`, err);
@@ -560,7 +572,8 @@ async function monitorAds(client) {
                     // Prevent duplicate posts (in-memory and DB)
                     // The above checks are now sufficient for preventing duplicates
                     
-                    console.log(`[AdMonitor] Posting new ad for item ${item_id} from user ${ad.username}`);
+                    console.log(`[AdMonitor] Posting new ad for item ${item_id} from user ${ad.username} (ad #${ad.adElemIndex})`);
+                    console.log(`[AdMonitor] Ad details - Offered: ${ad.offerItems.map(i => i.name).join(', ')}, Requested: ${ad.requestItems.map(i => i.name).join(', ')}`);
                     
                     // Update user duplicate cache
                     userDuplicateCache.set(userDuplicateKey, now);
@@ -575,9 +588,11 @@ async function monitorAds(client) {
                     // Fetch trade ad screenshot
                     let attachment = null;
                     try {
+                        console.log(`[AdMonitor] Taking screenshot for ad #${ad.adElemIndex} with tracked item ${item_id}`);
                         const buffer = await getTradeAdScreenshot(ad.adElemIndex);
                         if (buffer) {
                             attachment = new AttachmentBuilder(buffer, { name: 'trade_ad.png' });
+                            console.log(`[AdMonitor] Screenshot captured successfully for ad #${ad.adElemIndex}`);
                         }
                     } catch (err) {
                         console.error(`[AdMonitor] Screenshot error:`, err);
