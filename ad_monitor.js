@@ -20,6 +20,12 @@ const userDuplicateCache = new Map(); // key: `${username}-${itemId}`, value: ti
 // Track ad content hashes to prevent duplicate content
 const adContentCache = new Map(); // key: `${username}-${itemId}-${adContentHash}`, value: timestamp
 
+// Clean logging function
+function log(message, level = 'INFO') {
+    const timestamp = new Date().toISOString().split('T')[1].split('.')[0];
+    console.log(`[${timestamp}][${level}] ${message}`);
+}
+
 function parseAd(ad, trackedItemId) {
     // Username and profile
     const userAnchor = ad.find('.ad_creator_name');
@@ -37,9 +43,6 @@ function parseAd(ad, trackedItemId) {
         time = ad.find('[class*="time"]').text().trim();
     }
     if (!time) {
-        time = ad.find('[class*="ago"]').text().trim();
-    }
-    if (!time) {
         time = ad.find('[title*="ago"]').attr('title');
     }
     if (!time) {
@@ -52,7 +55,7 @@ function parseAd(ad, trackedItemId) {
             }
         });
     }
-    console.log(`[AdMonitor][DEBUG] Raw time text: "${time}"`);
+    
     // Trade details link
     const detailsAnchor = ad.find('.trade_ad_page_link_button');
     const detailsPath = detailsAnchor.attr('href');
@@ -107,11 +110,6 @@ function parseAd(ad, trackedItemId) {
         const isPlaceholder = dataSrc && PLACEHOLDER_IMAGES.includes(dataSrc);
         const hasValidOnclick = onclick && onclick.includes('item_select_handler');
         
-        // Debug logging for first few items
-        if (i < 3) {
-            console.log(`[AdMonitor][DEBUG] Request item ${i}: onclick="${onclick}", dataSrc="${dataSrc}", isPlaceholder=${isPlaceholder}, hasValidOnclick=${hasValidOnclick}`);
-        }
-        
         if (hasValidOnclick && !isPlaceholder) {
             const itemId = (onclick.match(/item_select_handler\((\d+),/) || [])[1] || '';
             requestItems.push({
@@ -123,14 +121,9 @@ function parseAd(ad, trackedItemId) {
                 onclick,
                 id: itemId
             });
-            
-            // Debug logging for added items
-            if (i < 3) {
-                console.log(`[AdMonitor][DEBUG] Added request item: id=${itemId}, name="${title.split('<br>')[0] || alt}"`);
-            }
         }
     });
-    // Find the tracked item on the request side (if specific itemId provided)
+
     let trackedItem = null;
     let trackedItemValue = null;
     let trackedItemRAP = null;
@@ -139,13 +132,6 @@ function parseAd(ad, trackedItemId) {
     
     if (trackedItemId) {
         trackedItem = requestItems.find(i => i.id === trackedItemId) || requestItems.find(i => i.onclick && i.onclick.includes(trackedItemId));
-        
-        // Debug logging for tracked item
-        if (trackedItem) {
-            console.log(`[AdMonitor][DEBUG] Found tracked item: id=${trackedItem.id}, name="${trackedItem.name}"`);
-        } else {
-            console.log(`[AdMonitor][DEBUG] Tracked item ${trackedItemId} not found in request items. Available items: ${requestItems.map(i => i.id).join(', ')}`);
-        }
         
         // Request value/RAP (now only for tracked item)
         trackedItemValue = trackedItem && trackedItem.value ? parseInt(trackedItem.value.replace(/,/g, '')) : null;
@@ -261,12 +247,12 @@ async function fetchAllTradeAds() {
         break; // Success, exit retry loop
     } catch (err) {
         lastError = err;
-        console.error(`[AdMonitor][Puppeteer][Attempt ${attempt}/${maxRetries}] Error loading main trades page: ${err.name}: ${err.message}`);
+        log(`[Attempt ${attempt}/${maxRetries}] Error loading main trades page: ${err.name}: ${err.message}`, 'ERROR');
         if (browser) {
             try { await browser.close(); } catch (e) {}
         }
         if (attempt === maxRetries) {
-            throw new Error(`[AdMonitor][Puppeteer] Failed to load main trades page after ${maxRetries} attempts: ${err.message}`);
+            throw new Error(`Failed to load main trades page after ${maxRetries} attempts: ${err.message}`);
         }
         // Wait a bit before retrying
         await new Promise(res => setTimeout(res, 2000 * attempt));
@@ -277,16 +263,8 @@ async function fetchAllTradeAds() {
     const ads = [];
     $('.mix_item').each((i, el) => {
         const adElem = $(el);
-        if (i === 0) {
-            // Log the raw HTML of the request side for the first ad
-            const requestSideHtml = adElem.find('.ad_side_right').html();
-            console.log(`[AdMonitor][DEBUG] Raw HTML of .ad_side_right for first ad:\n${requestSideHtml}`);
-        }
         const ad = parseAd(adElem, null); // No specific itemId since we're scanning all ads
         const adId = ad.detailsUrl || Buffer.from(adElem.html()).toString('base64');
-        // Log all request-side item IDs for every ad
-        const requestItemIds = ad.requestItems.map(img => String(img.id));
-        console.log(`[AdMonitor][DEBUG] (ad #${i}) Request side item IDs: ${JSON.stringify(requestItemIds)}`);
         ads.push({ ...ad, adId, url, adElemIndex: i });
     });
     return ads;
@@ -374,9 +352,9 @@ async function getTradeAdScreenshot(adElemIndex) {
             });
         }
     } catch (err) {
-        console.error(`[AdMonitor][Puppeteer] Error taking screenshot for ad ${adElemIndex}:`, err);
+        log(`Error taking screenshot for ad ${adElemIndex}: ${err.message}`, 'ERROR');
         if (err.message && err.message.includes('Failed to launch the browser process')) {
-            console.error('[AdMonitor][Puppeteer] Try upgrading your Railway plan, or use a platform with more resources for headless browsers.');
+            log('Try upgrading your Railway plan, or use a platform with more resources for headless browsers.', 'ERROR');
         }
     }
     if (browser) await browser.close();
@@ -453,28 +431,28 @@ async function monitorAds(client) {
         try {
             const { rows: tracked } = await db.query('SELECT * FROM tracked_items');
             if (tracked.length === 0) {
-                console.log(`[AdMonitor] No tracked items found, skipping scan`);
+                log('No tracked items found, skipping scan');
                 return;
             }
             
             // Get all tracked item IDs for filtering
             const trackedItemIds = tracked.map(row => String(row.item_id));
-            console.log(`[AdMonitor] Scanning for ${trackedItemIds.length} tracked items: ${trackedItemIds.join(', ')}`);
+            log(`Scanning for ${trackedItemIds.length} tracked items: ${trackedItemIds.join(', ')}`);
             
             let allAds;
             try {
                 allAds = await fetchAllTradeAds();
             } catch (err) {
-                console.error(`Failed to fetch ads from main trades page:`, err);
+                log(`Failed to fetch ads from main trades page: ${err.message}`, 'ERROR');
                 return;
             }
             
             if (!allAds || allAds.length === 0) {
-                console.log(`[AdMonitor] No ads found on main trades page`);
+                log('No ads found on main trades page');
                 return;
             }
             
-            console.log(`[AdMonitor] Found ${allAds.length} ads on main trades page`);
+            log(`Found ${allAds.length} ads on main trades page`);
             
             // Process each tracked item
             for (const row of tracked) {
@@ -490,12 +468,10 @@ async function monitorAds(client) {
                     
                     // Only post ads newer than tracking_started_at
                     let adTime = parseAdTime(ad.time);
-                    console.log(`[AdMonitor][DEBUG] Ad time: "${ad.time}" -> parsed: ${adTime}`);
-                    console.log(`[AdMonitor][DEBUG] Tracking started at: ${tracking_started_at}`);
                     
                     // Skip ads without valid time since we can't filter them
                     if (!adTime) {
-                        console.log(`[AdMonitor] Skipping ad without valid time: "${ad.time}"`);
+                        log(`Skipping ad without valid time: "${ad.time}"`);
                         continue;
                     }
                     
@@ -503,7 +479,7 @@ async function monitorAds(client) {
                     const currentTime = new Date();
                     const twoMinutesAgo = new Date(currentTime.getTime() - 2 * 60 * 1000);
                     if (adTime < twoMinutesAgo) {
-                        console.log(`[AdMonitor] Skipping ad older than 2 minutes: ${ad.time} (${adTime})`);
+                        log(`Skipping ad older than 2 minutes: ${ad.time}`);
                         continue;
                     }
                     
@@ -511,36 +487,30 @@ async function monitorAds(client) {
                     if (ad.time) {
                         const timeText = ad.time.toLowerCase();
                         
-                        // Auto-accept any ad with "seconds" in the timestamp (very fresh)
-                        if (timeText.includes('second')) {
-                            console.log(`[AdMonitor] Auto-accepting ad with seconds timestamp: ${ad.time} (very fresh)`);
-                            // Continue to next checks (don't skip)
-                        }
                         // Skip any ads with "hour" or "hours" in the timestamp
-                        else if (timeText.includes('hour') || timeText.includes('hours')) {
-                            console.log(`[AdMonitor] Skipping ad with hour-old timestamp: ${ad.time}`);
+                        if (timeText.includes('hour') || timeText.includes('hours')) {
+                            log(`Skipping ad with hour-old timestamp: ${ad.time}`);
                             continue;
                         }
                         // Skip ads with minutes > 2
                         else if (timeText.includes('minute')) {
                             const minuteMatch = timeText.match(/(\d+)\s*minute/);
                             if (minuteMatch && parseInt(minuteMatch[1]) > 2) {
-                                console.log(`[AdMonitor] Skipping ad with old minute timestamp: ${ad.time} (${minuteMatch[1]} minutes > 2)`);
+                                log(`Skipping ad with old minute timestamp: ${ad.time} (${minuteMatch[1]} minutes > 2)`);
                                 continue;
                             }
                         }
                         // Skip ads with "day" or "days" in timestamp
                         else if (timeText.includes('day') || timeText.includes('days')) {
-                            console.log(`[AdMonitor] Skipping ad with day-old timestamp: ${ad.time}`);
+                            log(`Skipping ad with day-old timestamp: ${ad.time}`);
                             continue;
                         }
                     }
                     
                     if (tracking_started_at && adTime) {
                         const startTime = new Date(tracking_started_at);
-                        console.log(`[AdMonitor][DEBUG] Comparing: adTime ${adTime} vs startTime ${startTime}`);
                         if (adTime < startTime) {
-                            console.log(`[AdMonitor] Skipping ad older than tracking start: ${ad.time} < ${startTime}`);
+                            log(`Skipping ad older than tracking start: ${ad.time}`);
                             continue;
                         }
                     }
@@ -550,7 +520,7 @@ async function monitorAds(client) {
                     const now = new Date();
                     const lastUserAdTime = userDuplicateCache.get(userDuplicateKey);
                     if (lastUserAdTime && (now.getTime() - lastUserAdTime.getTime()) < 1800000) { // 30 minutes
-                        console.log(`[AdMonitor] Skipping duplicate ad from user ${ad.username} for item ${item_id} within 30 minutes`);
+                        log(`Skipping duplicate ad from user ${ad.username} for item ${item_id} within 30 minutes`);
                         continue;
                     }
                     
@@ -558,22 +528,21 @@ async function monitorAds(client) {
                     const adContentHash = `${ad.username}-${item_id}-${ad.offerItems.length}-${ad.requestItems.length}-${ad.offerValue}-${ad.requestValue}`;
                     const lastContentTime = adContentCache.get(adContentHash);
                     if (lastContentTime && (now.getTime() - lastContentTime.getTime()) < 3600000) { // 1 hour
-                        console.log(`[AdMonitor] Skipping duplicate content ad from user ${ad.username} for item ${item_id}`);
+                        log(`Skipping duplicate content ad from user ${ad.username} for item ${item_id}`);
                         continue;
                     }
                     
                     // Check for exact ad duplicates (same ad ID)
                     if (ad.adId === last_ad_id || postedAdIds.has(ad.adId)) {
-                        console.log(`[AdMonitor] Skipping duplicate ad ID: ${ad.adId}`);
+                        log(`Skipping duplicate ad ID: ${ad.adId}`);
                         continue;
                     }
                     
                     foundMatch = true;
-                    // Prevent duplicate posts (in-memory and DB)
-                    // The above checks are now sufficient for preventing duplicates
                     
-                    console.log(`[AdMonitor] Posting new ad for item ${item_id} from user ${ad.username} (ad #${ad.adElemIndex})`);
-                    console.log(`[AdMonitor] Ad details - Offered: ${ad.offerItems.map(i => i.name).join(', ')}, Requested: ${ad.requestItems.map(i => i.name).join(', ')}`);
+                    log(`📢 New ad found! Item ${item_id} from ${ad.username} (ad #${ad.adElemIndex})`);
+                    log(`   Offered: ${ad.offerItems.map(i => i.name).join(', ')}`);
+                    log(`   Requested: ${ad.requestItems.map(i => i.name).join(', ')}`);
                     
                     // Update user duplicate cache
                     userDuplicateCache.set(userDuplicateKey, now);
@@ -588,14 +557,14 @@ async function monitorAds(client) {
                     // Fetch trade ad screenshot
                     let attachment = null;
                     try {
-                        console.log(`[AdMonitor] Taking screenshot for ad #${ad.adElemIndex} with tracked item ${item_id}`);
+                        log(`Taking screenshot for ad #${ad.adElemIndex}`);
                         const buffer = await getTradeAdScreenshot(ad.adElemIndex);
                         if (buffer) {
                             attachment = new AttachmentBuilder(buffer, { name: 'trade_ad.png' });
-                            console.log(`[AdMonitor] Screenshot captured successfully for ad #${ad.adElemIndex}`);
+                            log(`Screenshot captured successfully for ad #${ad.adElemIndex}`);
                         }
                     } catch (err) {
-                        console.error(`[AdMonitor] Screenshot error:`, err);
+                        log(`Screenshot error: ${err.message}`, 'ERROR');
                     }
 
                     // Determine embed color based on value difference
@@ -666,10 +635,10 @@ async function monitorAds(client) {
                                 }
                                 
                                 await user.send(dmMessage);
-                                console.log(`[AdMonitor] DM sent to user ${user_id} for item ${item_id}`);
+                                log(`DM sent to user ${user_id} for item ${item_id}`);
                             }
                         } catch (dmError) {
-                            console.log(`[AdMonitor] Could not send DM to user ${user_id}: ${dmError.message}`);
+                            log(`Could not send DM to user ${user_id}: ${dmError.message}`, 'ERROR');
                             // Don't fail the whole process if DM fails
                         }
                     }
@@ -681,11 +650,11 @@ async function monitorAds(client) {
                     break;
                 }
                 if (!foundMatch) {
-                    console.log(`[AdMonitor] No ads with item ${item_id} on request side found in this cycle.`);
+                    log(`No ads with item ${item_id} on request side found in this cycle.`);
                 }
             }
         } catch (err) {
-            console.error('Error in ad monitor:', err);
+            log(`Error in ad monitor: ${err.message}`, 'ERROR');
         }
     }, 15000); // 15 seconds - much faster scanning
 }
