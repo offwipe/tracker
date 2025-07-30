@@ -270,8 +270,8 @@ async function fetchAllTradeAds() {
     return ads;
 }
 
-async function getTradeAdScreenshot(adElemIndex) {
-    const url = 'https://www.rolimons.com/trades';
+async function getTradeAdScreenshot(itemId, adElemIndex) {
+    const url = `https://www.rolimons.com/itemtrades/${itemId}`;
     let browser, page, buffer = null;
     try {
         browser = await puppeteer.launch({
@@ -291,8 +291,8 @@ async function getTradeAdScreenshot(adElemIndex) {
         });
         page = await browser.newPage();
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
-        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 }); // Increased navigation timeout
-        await page.waitForSelector('.mix_item', { timeout: 30000 }); // Increased selector timeout
+        await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
+        await page.waitForSelector('.mix_item', { timeout: 10000 });
         
         // Wait for images to load and handle lazy loading
         await page.evaluate(async () => {
@@ -352,7 +352,7 @@ async function getTradeAdScreenshot(adElemIndex) {
             });
         }
     } catch (err) {
-        log(`Error taking screenshot for ad ${adElemIndex}: ${err.message}`, 'ERROR');
+        log(`Error taking screenshot for item ${itemId}: ${err.message}`, 'ERROR');
         if (err.message && err.message.includes('Failed to launch the browser process')) {
             log('Try upgrading your Railway plan, or use a platform with more resources for headless browsers.', 'ERROR');
         }
@@ -547,11 +547,11 @@ async function monitorAds(client) {
                     // Fetch trade ad screenshot
                     let attachment = null;
                     try {
-                        log(`Taking screenshot for ad #${ad.adElemIndex}`);
-                        const buffer = await getTradeAdScreenshot(ad.adElemIndex);
+                        log(`Taking screenshot for item ${item_id}, ad #${ad.adElemIndex}`);
+                        const buffer = await getTradeAdScreenshot(item_id, ad.adElemIndex);
                         if (buffer) {
                             attachment = new AttachmentBuilder(buffer, { name: 'trade_ad.png' });
-                            log(`Screenshot captured successfully for ad #${ad.adElemIndex}`);
+                            log(`Screenshot captured successfully for item ${item_id}, ad #${ad.adElemIndex}`);
                         }
                     } catch (err) {
                         log(`Screenshot error: ${err.message}`, 'ERROR');
