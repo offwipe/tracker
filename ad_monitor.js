@@ -361,7 +361,7 @@ async function getTradeAdScreenshot(adElemIndex) {
         if (adHandles[adElemIndex]) {
             // Scroll to the specific ad to ensure it's visible
             await adHandles[adElemIndex].scrollIntoView();
-            await page.waitForTimeout(1000); // Wait for any animations
+            await new Promise(resolve => setTimeout(resolve, 1000)); // Wait for any animations
             buffer = await adHandles[adElemIndex].screenshot({ 
                 encoding: 'binary', 
                 type: 'png',
