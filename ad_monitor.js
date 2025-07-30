@@ -183,23 +183,30 @@ function parseAd(ad, trackedItemId) {
 async function fetchAllRequestAds(itemId) {
     const url = `https://www.rolimons.com/itemtrades/${itemId}`;
     let browser, page, html;
-    try {
-        browser = await puppeteer.launch({
-            args: [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-gpu',
-                '--single-process',
-                '--no-zygote'
-            ],
-            headless: true,
-            executablePath: '/usr/bin/chromium-browser'
-        });
-        page = await browser.newPage();
-        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
-        await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
-        await page.waitForSelector('.mix_item', { timeout: 10000 });
+    const maxRetries = 3;
+    let lastError;
+    
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+            browser = await puppeteer.launch({
+                args: [
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-gpu',
+                    '--single-process',
+                    '--no-zygote',
+                    '--js-flags=--max-old-space-size=256'
+                ],
+                headless: true,
+                executablePath: '/usr/bin/chromium-browser',
+                ignoreDefaultArgs: ['--disable-extensions', '--disable-plugins', '--disable-images', '--disable-javascript', '--disable-background-timer-throttling', '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding'],
+                timeout: 90000 // Increased browser launch timeout
+            });
+            page = await browser.newPage();
+            await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
+            await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 }); // Increased navigation timeout
+            await page.waitForSelector('.mix_item', { timeout: 30000 }); // Increased selector timeout
         
         // Wait for images to load and handle lazy loading
         await page.evaluate(async () => {
@@ -243,13 +250,19 @@ async function fetchAllRequestAds(itemId) {
         });
         
         html = await page.content();
+        break; // Success, exit retry loop
     } catch (err) {
-        console.error(`[AdMonitor][Puppeteer] Error loading page for item ${itemId}:`, err);
-        if (err.message && err.message.includes('Failed to launch the browser process')) {
-            console.error('[AdMonitor][Puppeteer] Try upgrading your Railway plan, or use a platform with more resources for headless browsers.');
+        lastError = err;
+        console.error(`[AdMonitor][Puppeteer][Attempt ${attempt}/${maxRetries}] Error loading page for item ${itemId}: ${err.name}: ${err.message}`);
+        if (browser) {
+            try { await browser.close(); } catch (e) {}
         }
-        if (browser) await browser.close();
-        return [];
+        if (attempt === maxRetries) {
+            throw new Error(`[AdMonitor][Puppeteer] Failed to load page for item ${itemId} after ${maxRetries} attempts: ${err.message}`);
+        }
+        // Wait a bit before retrying
+        await new Promise(res => setTimeout(res, 2000 * attempt));
+    }
     }
     if (browser) await browser.close();
     const $ = cheerio.load(html);
@@ -282,15 +295,18 @@ async function getTradeAdScreenshot(itemId, adElemIndex) {
                 '--disable-dev-shm-usage',
                 '--disable-gpu',
                 '--single-process',
-                '--no-zygote'
+                '--no-zygote',
+                '--js-flags=--max-old-space-size=256'
             ],
             headless: true,
-            executablePath: '/usr/bin/chromium-browser'
+            executablePath: '/usr/bin/chromium-browser',
+            ignoreDefaultArgs: ['--disable-extensions', '--disable-plugins', '--disable-images', '--disable-javascript', '--disable-background-timer-throttling', '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding'],
+            timeout: 90000 // Increased browser launch timeout
         });
         page = await browser.newPage();
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
-        await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
-        await page.waitForSelector('.mix_item', { timeout: 10000 });
+        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 }); // Increased navigation timeout
+        await page.waitForSelector('.mix_item', { timeout: 30000 }); // Increased selector timeout
         
         // Wait for images to load and handle lazy loading
         await page.evaluate(async () => {
@@ -558,7 +574,7 @@ async function monitorAds(client) {
                         embedColor = ad.valueDiff >= 0 ? 0x2ecc40 : 0xe74c3c;
                     }
 
-                    // Build embed with improved formatting
+                    // Build embed with consistent formatting
                     const embed = new EmbedBuilder()
                         .setTitle(`Send ${ad.username} a Trade`)
                         .setURL(ad.sendTradeUrl || ad.profileUrl)
