@@ -356,29 +356,35 @@ function parseAdTime(adTimeStr) {
     if (!adTimeStr) return null;
     adTimeStr = adTimeStr.trim();
     
+    // First, do strict text-based filtering
+    const timeText = adTimeStr.toLowerCase();
+    
+    // Reject any ads with "hour", "hours", "day", "days" in the timestamp
+    if (timeText.includes('hour') || timeText.includes('hours') || 
+        timeText.includes('day') || timeText.includes('days')) {
+        return null;
+    }
+    
     if (/ago$/.test(adTimeStr)) {
         const now = new Date();
-        const hourMatch = adTimeStr.match(/(\d+)\s*hour/);
         const minMatch = adTimeStr.match(/(\d+)\s*minute/);
         const secMatch = adTimeStr.match(/(\d+)\s*second/);
         
-        // Reject hours - too old
-        if (hourMatch) {
-            return null;
-        }
-        
-        // Reject minutes over 2
+        // Reject minutes over 1 (even stricter)
         if (minMatch) {
             const minutes = parseInt(minMatch[1]);
-            if (minutes > 2) {
+            if (minutes > 1) {
                 return null;
             }
             return new Date(now.getTime() - minutes * 60000);
         }
         
-        // Accept any seconds timestamp (auto-accept for freshness)
+        // Accept only seconds under 30 (very fresh)
         if (secMatch) {
             const seconds = parseInt(secMatch[1]);
+            if (seconds > 30) {
+                return null;
+            }
             return new Date(now.getTime() - seconds * 1000);
         }
         
@@ -392,10 +398,10 @@ function parseAdTime(adTimeStr) {
         return null;
     }
     
-    // Reject dates that are too old (more than 2 minutes)
+    // Reject dates that are too old (more than 1 minute)
     const now = new Date();
-    const twoMinutesAgo = new Date(now.getTime() - 2 * 60 * 1000);
-    if (parsed < twoMinutesAgo) {
+    const oneMinuteAgo = new Date(now.getTime() - 1 * 60 * 1000);
+    if (parsed < oneMinuteAgo) {
         return null;
     }
     
@@ -421,6 +427,13 @@ async function monitorAds(client) {
                 }
                 let foundMatch = false;
                 for (const ad of ads) {
+                    // First check if the ad is fresh enough before processing
+                    let adTime = parseAdTime(ad.time);
+                    if (!adTime) {
+                        log(`Skipping ad without valid time: "${ad.time}"`);
+                        continue;
+                    }
+                    
                     // Check if the tracked item is on the request side (string-to-string)
                     const match = ad.requestItems.some(img => String(img.id) === String(item_id));
                     if (!match) {
@@ -429,23 +442,16 @@ async function monitorAds(client) {
                     }
                     
                     // Filter out ads older than bot startup time
-                    let adTime = parseAdTime(ad.time);
                     if (adTime && adTime < botStartupTime) {
                         log(`Skipping ad older than bot startup: ${ad.time}`);
                         continue;
                     }
                     
-                    // Skip ads without valid time since we can't filter them
-                    if (!adTime) {
-                        log(`Skipping ad without valid time: "${ad.time}"`);
-                        continue;
-                    }
-                    
-                    // Hard limit: Skip ads older than 2 minutes
+                    // Hard limit: Skip ads older than 1 minute
                     const currentTime = new Date();
-                    const twoMinutesAgo = new Date(currentTime.getTime() - 2 * 60 * 1000);
-                    if (adTime < twoMinutesAgo) {
-                        log(`Skipping ad older than 2 minutes: ${ad.time}`);
+                    const oneMinuteAgo = new Date(currentTime.getTime() - 1 * 60 * 1000);
+                    if (adTime < oneMinuteAgo) {
+                        log(`Skipping ad older than 1 minute: ${ad.time}`);
                         continue;
                     }
                     
@@ -458,11 +464,11 @@ async function monitorAds(client) {
                             log(`Skipping ad with hour-old timestamp: ${ad.time}`);
                             continue;
                         }
-                        // Skip ads with minutes > 2
+                        // Skip ads with minutes > 1
                         else if (timeText.includes('minute')) {
                             const minuteMatch = timeText.match(/(\d+)\s*minute/);
-                            if (minuteMatch && parseInt(minuteMatch[1]) > 2) {
-                                log(`Skipping ad with old minute timestamp: ${ad.time} (${minuteMatch[1]} minutes > 2)`);
+                            if (minuteMatch && parseInt(minuteMatch[1]) > 1) {
+                                log(`Skipping ad with old minute timestamp: ${ad.time} (${minuteMatch[1]} minutes > 1)`);
                                 continue;
                             }
                         }
@@ -470,6 +476,14 @@ async function monitorAds(client) {
                         else if (timeText.includes('day') || timeText.includes('days')) {
                             log(`Skipping ad with day-old timestamp: ${ad.time}`);
                             continue;
+                        }
+                        // Skip ads with seconds > 30
+                        else if (timeText.includes('second')) {
+                            const secondMatch = timeText.match(/(\d+)\s*second/);
+                            if (secondMatch && parseInt(secondMatch[1]) > 30) {
+                                log(`Skipping ad with old second timestamp: ${ad.time} (${secondMatch[1]} seconds > 30)`);
+                                continue;
+                            }
                         }
                     }
                     
@@ -510,9 +524,11 @@ async function monitorAds(client) {
                     // Fetch trade ad screenshot
                     let attachment = null;
                     try {
+                        log(`Taking screenshot for item ${item_id}, ad #${ad.adElemIndex}, time: "${ad.time}"`);
                         const buffer = await getTradeAdScreenshot(item_id, ad.adElemIndex);
                         if (buffer) {
                             attachment = new AttachmentBuilder(buffer, { name: 'trade_ad.png' });
+                            log(`Screenshot captured successfully for item ${item_id}, ad #${ad.adElemIndex}`);
                         }
                     } catch (err) {
                         log(`Screenshot error: ${err.message}`, 'ERROR');
