@@ -174,33 +174,28 @@ function parseAd(ad, trackedItemId) {
     };
 }
 
-async function fetchAllTradeAds() {
-    const url = 'https://www.rolimons.com/trades';
+async function fetchAllRequestAds(itemId) {
+    const url = `https://www.rolimons.com/itemtrades/${itemId}`;
     let browser, page, html;
-    const maxRetries = 3;
-    let lastError;
-    
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-        try {
-            browser = await puppeteer.launch({
-                args: [
-                    '--no-sandbox',
-                    '--disable-setuid-sandbox',
-                    '--disable-dev-shm-usage',
-                    '--disable-gpu',
-                    '--single-process',
-                    '--no-zygote',
-                    '--js-flags=--max-old-space-size=256'
-                ],
-                headless: true,
-                executablePath: '/usr/bin/chromium-browser',
-                ignoreDefaultArgs: ['--disable-extensions', '--disable-plugins', '--disable-images', '--disable-javascript', '--disable-background-timer-throttling', '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding'],
-                timeout: 90000 // Increased browser launch timeout
-            });
-            page = await browser.newPage();
-            await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
-            await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 }); // Increased navigation timeout
-            await page.waitForSelector('.mix_item', { timeout: 30000 }); // Increased selector timeout
+    try {
+        browser = await puppeteer.launch({
+            args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-gpu',
+                '--single-process',
+                '--no-zygote'
+            ],
+            headless: true,
+            executablePath: '/usr/bin/chromium-browser',
+            ignoreDefaultArgs: ['--disable-extensions', '--disable-plugins', '--disable-images', '--disable-javascript', '--disable-background-timer-throttling', '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding'],
+            timeout: 90000
+        });
+        page = await browser.newPage();
+        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
+        await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
+        await page.waitForSelector('.mix_item', { timeout: 10000 });
         
         // Wait for images to load and handle lazy loading
         await page.evaluate(async () => {
@@ -244,26 +239,20 @@ async function fetchAllTradeAds() {
         });
         
         html = await page.content();
-        break; // Success, exit retry loop
     } catch (err) {
-        lastError = err;
-        log(`[Attempt ${attempt}/${maxRetries}] Error loading main trades page: ${err.name}: ${err.message}`, 'ERROR');
-        if (browser) {
-            try { await browser.close(); } catch (e) {}
+        log(`Error loading page for item ${itemId}: ${err.message}`, 'ERROR');
+        if (err.message && err.message.includes('Failed to launch the browser process')) {
+            log('Try upgrading your Railway plan, or use a platform with more resources for headless browsers.', 'ERROR');
         }
-        if (attempt === maxRetries) {
-            throw new Error(`Failed to load main trades page after ${maxRetries} attempts: ${err.message}`);
-        }
-        // Wait a bit before retrying
-        await new Promise(res => setTimeout(res, 2000 * attempt));
-    }
+        if (browser) await browser.close();
+        return [];
     }
     if (browser) await browser.close();
     const $ = cheerio.load(html);
     const ads = [];
     $('.mix_item').each((i, el) => {
         const adElem = $(el);
-        const ad = parseAd(adElem, null); // No specific itemId since we're scanning all ads
+        const ad = parseAd(adElem, itemId);
         const adId = ad.detailsUrl || Buffer.from(adElem.html()).toString('base64');
         ads.push({ ...ad, adId, url, adElemIndex: i });
     });
@@ -281,13 +270,12 @@ async function getTradeAdScreenshot(itemId, adElemIndex) {
                 '--disable-dev-shm-usage',
                 '--disable-gpu',
                 '--single-process',
-                '--no-zygote',
-                '--js-flags=--max-old-space-size=256'
+                '--no-zygote'
             ],
             headless: true,
             executablePath: '/usr/bin/chromium-browser',
             ignoreDefaultArgs: ['--disable-extensions', '--disable-plugins', '--disable-images', '--disable-javascript', '--disable-background-timer-throttling', '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding'],
-            timeout: 90000 // Increased browser launch timeout
+            timeout: 90000
         });
         page = await browser.newPage();
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
@@ -337,19 +325,7 @@ async function getTradeAdScreenshot(itemId, adElemIndex) {
         
         const adHandles = await page.$$('.mix_item');
         if (adHandles[adElemIndex]) {
-            // Scroll to the specific ad to ensure it's visible
-            await adHandles[adElemIndex].scrollIntoView();
-            await new Promise(resolve => setTimeout(resolve, 1000)); // Wait for any animations
-            buffer = await adHandles[adElemIndex].screenshot({ 
-                encoding: 'binary', 
-                type: 'png',
-                clip: {
-                    x: 0,
-                    y: 0,
-                    width: 800,
-                    height: 600
-                }
-            });
+            buffer = await adHandles[adElemIndex].screenshot({ encoding: 'binary', type: 'png' });
         }
     } catch (err) {
         log(`Error taking screenshot for item ${itemId}: ${err.message}`, 'ERROR');
@@ -362,184 +338,85 @@ async function getTradeAdScreenshot(itemId, adElemIndex) {
 }
 
 function parseAdTime(adTimeStr) {
-    // Try to parse "x minutes ago", "x seconds ago", "x hours ago", or ISO string
+    // Try to parse "x minutes ago", "x seconds ago", or ISO string
     if (!adTimeStr) return null;
     adTimeStr = adTimeStr.trim();
-    
-    // Handle "ago" format timestamps from HTML
     if (/ago$/.test(adTimeStr)) {
         const now = new Date();
-        const hourMatch = adTimeStr.match(/(\d+)\s*hour/);
-        const minMatch = adTimeStr.match(/(\d+)\s*minute/);
-        const secMatch = adTimeStr.match(/(\d+)\s*second/);
-        
-        // Reject hours - too old
-        if (hourMatch) {
-            const hours = parseInt(hourMatch[1]);
-            return null;
-        }
-        
-        // Reject minutes over 2
-        if (minMatch) {
-            const minutes = parseInt(minMatch[1]);
-            if (minutes > 2) {
-                return null;
-            }
-            const adTime = new Date(now.getTime() - minutes * 60000);
-            return adTime;
-        }
-        
-        // Accept any seconds timestamp (auto-accept for freshness)
-        if (secMatch) {
-            const seconds = parseInt(secMatch[1]);
-            const adTime = new Date(now.getTime() - seconds * 1000);
-            return adTime;
-        }
-        
-        // If it ends with "ago" but doesn't match our patterns, reject it
-        return null;
+        const min = adTimeStr.match(/(\d+)\s*minute/);
+        const sec = adTimeStr.match(/(\d+)\s*second/);
+        if (min) return new Date(now.getTime() - parseInt(min[1]) * 60000);
+        if (sec) return new Date(now.getTime() - parseInt(sec[1]) * 1000);
+        return now;
     }
-    
-    // Try to parse as ISO or date string, but be very strict
+    // Try to parse as ISO or date string
     const parsed = new Date(adTimeStr);
-    if (isNaN(parsed)) {
-        return null;
-    }
-    
-    // Reject dates that are too old (more than 2 minutes)
-    const now = new Date();
-    const twoMinutesAgo = new Date(now.getTime() - 2 * 60 * 1000);
-    if (parsed < twoMinutesAgo) {
-        return null;
-    }
-    
-    return parsed;
+    return isNaN(parsed) ? null : parsed;
 }
 
 async function monitorAds(client) {
     setInterval(async () => {
         try {
             const { rows: tracked } = await db.query('SELECT * FROM tracked_items');
-            if (tracked.length === 0) {
-                log('No tracked items found, skipping scan');
-                return;
-            }
-            
-            // Get all tracked item IDs for filtering
-            const trackedItemIds = tracked.map(row => String(row.item_id));
-            log(`Scanning for ${trackedItemIds.length} tracked items: ${trackedItemIds.join(', ')}`);
-            
-            let allAds;
-            try {
-                allAds = await fetchAllTradeAds();
-            } catch (err) {
-                log(`Failed to fetch ads from main trades page: ${err.message}`, 'ERROR');
-                return;
-            }
-            
-            if (!allAds || allAds.length === 0) {
-                log('No ads found on main trades page');
-                return;
-            }
-            
-            log(`Found ${allAds.length} ads on main trades page`);
-            
-            // Process each tracked item
             for (const row of tracked) {
                 const { guild_id, channel_id, user_id, item_id, last_ad_id, tracking_started_at } = row;
+                let ads;
+                try {
+                    ads = await fetchAllRequestAds(item_id);
+                } catch (err) {
+                    log(`Failed to fetch ads for item ${item_id}: ${err.message}`, 'ERROR');
+                    continue;
+                }
+                if (!ads || ads.length === 0) {
+                    log(`No ads found for item ${item_id}`);
+                    continue;
+                }
                 let foundMatch = false;
-                
-                for (const ad of allAds) {
+                for (const ad of ads) {
                     // Check if the tracked item is on the request side (string-to-string)
-                    const hasTrackedItem = ad.requestItems.some(img => String(img.id) === String(item_id));
-                    if (!hasTrackedItem) {
-                        continue; // Skip ads that don't contain this tracked item
+                    const match = ad.requestItems.some(img => String(img.id) === String(item_id));
+                    if (!match) {
+                        log(`Ad skipped - tracked item ${item_id} not found in request items: ${ad.requestItems.map(i => i.id).join(', ')}`);
+                        continue;
+                    }
+                    
+                    // Filter out ads older than bot startup time
+                    let adTime = parseAdTime(ad.time);
+                    if (adTime && adTime < botStartupTime) {
+                        log(`Skipping ad older than bot startup: ${ad.time}`);
+                        continue;
                     }
                     
                     // Only post ads newer than tracking_started_at
-                    let adTime = parseAdTime(ad.time);
-                    
-                    // Skip ads without valid time since we can't filter them
-                    if (!adTime) {
-                        log(`Skipping ad without valid time: "${ad.time}"`);
-                        continue;
-                    }
-                    
-                    // Hard limit: Skip ads older than 2 minutes
-                    const currentTime = new Date();
-                    const twoMinutesAgo = new Date(currentTime.getTime() - 2 * 60 * 1000);
-                    if (adTime < twoMinutesAgo) {
-                        log(`Skipping ad older than 2 minutes: ${ad.time}`);
-                        continue;
-                    }
-                    
-                    // Additional filtering based on raw time text
-                    if (ad.time) {
-                        const timeText = ad.time.toLowerCase();
-                        
-                        // Skip any ads with "hour" or "hours" in the timestamp
-                        if (timeText.includes('hour') || timeText.includes('hours')) {
-                            log(`Skipping ad with hour-old timestamp: ${ad.time}`);
-                            continue;
-                        }
-                        // Skip ads with minutes > 2
-                        else if (timeText.includes('minute')) {
-                            const minuteMatch = timeText.match(/(\d+)\s*minute/);
-                            if (minuteMatch && parseInt(minuteMatch[1]) > 2) {
-                                log(`Skipping ad with old minute timestamp: ${ad.time} (${minuteMatch[1]} minutes > 2)`);
-                                continue;
-                            }
-                        }
-                        // Skip ads with "day" or "days" in timestamp
-                        else if (timeText.includes('day') || timeText.includes('days')) {
-                            log(`Skipping ad with day-old timestamp: ${ad.time}`);
-                            continue;
-                        }
-                    }
-                    
                     if (tracking_started_at && adTime) {
                         const startTime = new Date(tracking_started_at);
                         if (adTime < startTime) {
-                            log(`Skipping ad older than tracking start: ${ad.time}`);
+                            log(`Skipping ad older than tracking start: ${ad.time} < ${startTime}`);
                             continue;
                         }
                     }
                     
-                    // Check for user duplicate ads (same user + item within 30 minutes)
+                    // Check for user duplicate ads (same user + item within 1 hour)
                     const userDuplicateKey = `${ad.username}-${item_id}`;
                     const now = new Date();
                     const lastUserAdTime = userDuplicateCache.get(userDuplicateKey);
-                    if (lastUserAdTime && (now.getTime() - lastUserAdTime.getTime()) < 1800000) { // 30 minutes
-                        log(`Skipping duplicate ad from user ${ad.username} for item ${item_id} within 30 minutes`);
+                    if (lastUserAdTime && (now.getTime() - lastUserAdTime.getTime()) < 3600000) { // 1 hour
+                        log(`Skipping duplicate ad from user ${ad.username} for item ${item_id} within 1 hour`);
                         continue;
                     }
                     
-                    // Check for content-based duplicates (same user + item + content within 1 hour)
-                    const adContentHash = `${ad.username}-${item_id}-${ad.offerItems.length}-${ad.requestItems.length}-${ad.offerValue}-${ad.requestValue}`;
-                    const lastContentTime = adContentCache.get(adContentHash);
-                    if (lastContentTime && (now.getTime() - lastContentTime.getTime()) < 3600000) { // 1 hour
-                        log(`Skipping duplicate content ad from user ${ad.username} for item ${item_id}`);
-                        continue;
-                    }
-                    
-                    // Check for exact ad duplicates (same ad ID)
+                    foundMatch = true;
+                    // Prevent duplicate posts (in-memory and DB)
                     if (ad.adId === last_ad_id || postedAdIds.has(ad.adId)) {
                         log(`Skipping duplicate ad ID: ${ad.adId}`);
                         continue;
                     }
                     
-                    foundMatch = true;
-                    
-                    log(`📢 New ad found! Item ${item_id} from ${ad.username} (ad #${ad.adElemIndex})`);
-                    log(`   Offered: ${ad.offerItems.map(i => i.name).join(', ')}`);
-                    log(`   Requested: ${ad.requestItems.map(i => i.name).join(', ')}`);
+                    log(`Posting new ad for item ${item_id} from user ${ad.username}`);
                     
                     // Update user duplicate cache
                     userDuplicateCache.set(userDuplicateKey, now);
                     postedAdIds.add(ad.adId);
-                    
-                    // Update content duplicate cache
-                    adContentCache.set(adContentHash, now);
                     
                     const channel = await client.channels.fetch(channel_id).catch(() => null);
                     if (!channel) continue;
@@ -547,11 +424,9 @@ async function monitorAds(client) {
                     // Fetch trade ad screenshot
                     let attachment = null;
                     try {
-                        log(`Taking screenshot for item ${item_id}, ad #${ad.adElemIndex}`);
                         const buffer = await getTradeAdScreenshot(item_id, ad.adElemIndex);
                         if (buffer) {
                             attachment = new AttachmentBuilder(buffer, { name: 'trade_ad.png' });
-                            log(`Screenshot captured successfully for item ${item_id}, ad #${ad.adElemIndex}`);
                         }
                     } catch (err) {
                         log(`Screenshot error: ${err.message}`, 'ERROR');
@@ -563,7 +438,7 @@ async function monitorAds(client) {
                         embedColor = ad.valueDiff >= 0 ? 0x2ecc40 : 0xe74c3c;
                     }
 
-                    // Build embed with consistent formatting
+                    // Build embed with improved formatting
                     const embed = new EmbedBuilder()
                         .setTitle(`Send ${ad.username} a Trade`)
                         .setURL(ad.sendTradeUrl || ad.profileUrl)
