@@ -20,7 +20,7 @@ const userDuplicateCache = new Map(); // key: `${username}-${itemId}`, value: ti
 // Track ad content hashes to prevent duplicate content
 const adContentCache = new Map(); // key: `${username}-${itemId}-${adContentHash}`, value: timestamp
 
-// Clean logging function
+// Clean logging function - updated to remove debug clutter
 function log(message, level = 'INFO') {
     const timestamp = new Date().toISOString().split('T')[1].split('.')[0];
     console.log(`[${timestamp}][${level}] ${message}`);
