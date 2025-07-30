@@ -193,7 +193,8 @@ async function fetchAllRequestAds(itemId) {
                 '--single-process',
                 '--no-zygote'
             ],
-            headless: true
+            headless: true,
+            executablePath: '/usr/bin/chromium-browser'
         });
         page = await browser.newPage();
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
@@ -283,7 +284,8 @@ async function getTradeAdScreenshot(itemId, adElemIndex) {
                 '--single-process',
                 '--no-zygote'
             ],
-            headless: true
+            headless: true,
+            executablePath: '/usr/bin/chromium-browser'
         });
         page = await browser.newPage();
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
