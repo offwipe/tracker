@@ -366,8 +366,6 @@ function parseAdTime(adTimeStr) {
     if (!adTimeStr) return null;
     adTimeStr = adTimeStr.trim();
     
-    console.log(`[AdMonitor][DEBUG] Parsing time string: "${adTimeStr}"`);
-    
     // Handle "ago" format timestamps from HTML
     if (/ago$/.test(adTimeStr)) {
         const now = new Date();
@@ -378,7 +376,6 @@ function parseAdTime(adTimeStr) {
         // Reject hours - too old
         if (hourMatch) {
             const hours = parseInt(hourMatch[1]);
-            console.log(`[AdMonitor][DEBUG] Rejecting hour-old timestamp: ${adTimeStr} (${hours} hours)`);
             return null;
         }
         
@@ -386,11 +383,9 @@ function parseAdTime(adTimeStr) {
         if (minMatch) {
             const minutes = parseInt(minMatch[1]);
             if (minutes > 2) {
-                console.log(`[AdMonitor][DEBUG] Rejecting old minute timestamp: ${adTimeStr} (${minutes} minutes > 2)`);
                 return null;
             }
             const adTime = new Date(now.getTime() - minutes * 60000);
-            console.log(`[AdMonitor][DEBUG] Accepted minute timestamp: ${adTimeStr} -> ${adTime}`);
             return adTime;
         }
         
@@ -398,19 +393,16 @@ function parseAdTime(adTimeStr) {
         if (secMatch) {
             const seconds = parseInt(secMatch[1]);
             const adTime = new Date(now.getTime() - seconds * 1000);
-            console.log(`[AdMonitor][DEBUG] Auto-accepted seconds timestamp: ${adTimeStr} -> ${adTime} (${seconds} seconds ago)`);
             return adTime;
         }
         
         // If it ends with "ago" but doesn't match our patterns, reject it
-        console.log(`[AdMonitor][DEBUG] Rejecting unknown "ago" format: ${adTimeStr}`);
         return null;
     }
     
     // Try to parse as ISO or date string, but be very strict
     const parsed = new Date(adTimeStr);
     if (isNaN(parsed)) {
-        console.log(`[AdMonitor][DEBUG] Could not parse as date: ${adTimeStr}`);
         return null;
     }
     
@@ -418,11 +410,9 @@ function parseAdTime(adTimeStr) {
     const now = new Date();
     const twoMinutesAgo = new Date(now.getTime() - 2 * 60 * 1000);
     if (parsed < twoMinutesAgo) {
-        console.log(`[AdMonitor][DEBUG] Rejecting old parsed date: ${adTimeStr} -> ${parsed} (older than 2 minutes)`);
         return null;
     }
     
-    console.log(`[AdMonitor][DEBUG] Accepted parsed date: ${adTimeStr} -> ${parsed}`);
     return parsed;
 }
 
