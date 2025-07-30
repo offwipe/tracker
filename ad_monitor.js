@@ -130,22 +130,30 @@ function parseAd(ad, trackedItemId) {
             }
         }
     });
-    // Find the tracked item on the request side
-    const trackedItem = requestItems.find(i => i.id === trackedItemId) || requestItems.find(i => i.onclick && i.onclick.includes(trackedItemId));
+    // Find the tracked item on the request side (if specific itemId provided)
+    let trackedItem = null;
+    let trackedItemValue = null;
+    let trackedItemRAP = null;
+    let valueDiff = null;
+    let rapDiff = null;
     
-    // Debug logging for tracked item
-    if (trackedItem) {
-        console.log(`[AdMonitor][DEBUG] Found tracked item: id=${trackedItem.id}, name="${trackedItem.name}"`);
-    } else {
-        console.log(`[AdMonitor][DEBUG] Tracked item ${trackedItemId} not found in request items. Available items: ${requestItems.map(i => i.id).join(', ')}`);
+    if (trackedItemId) {
+        trackedItem = requestItems.find(i => i.id === trackedItemId) || requestItems.find(i => i.onclick && i.onclick.includes(trackedItemId));
+        
+        // Debug logging for tracked item
+        if (trackedItem) {
+            console.log(`[AdMonitor][DEBUG] Found tracked item: id=${trackedItem.id}, name="${trackedItem.name}"`);
+        } else {
+            console.log(`[AdMonitor][DEBUG] Tracked item ${trackedItemId} not found in request items. Available items: ${requestItems.map(i => i.id).join(', ')}`);
+        }
+        
+        // Request value/RAP (now only for tracked item)
+        trackedItemValue = trackedItem && trackedItem.value ? parseInt(trackedItem.value.replace(/,/g, '')) : null;
+        trackedItemRAP = trackedItem && trackedItem.rap ? parseInt(trackedItem.rap.replace(/,/g, '')) : null;
+        // Value and RAP difference (use only tracked item from request side)
+        valueDiff = (offerValue && trackedItemValue !== null) ? offerValue - trackedItemValue : null;
+        rapDiff = (offerRAP && trackedItemRAP !== null) ? offerRAP - trackedItemRAP : null;
     }
-    
-    // Request value/RAP (now only for tracked item)
-    const trackedItemValue = trackedItem && trackedItem.value ? parseInt(trackedItem.value.replace(/,/g, '')) : null;
-    const trackedItemRAP = trackedItem && trackedItem.rap ? parseInt(trackedItem.rap.replace(/,/g, '')) : null;
-    // Value and RAP difference (use only tracked item from request side)
-    const valueDiff = (offerValue && trackedItemValue !== null) ? offerValue - trackedItemValue : null;
-    const rapDiff = (offerRAP && trackedItemRAP !== null) ? offerRAP - trackedItemRAP : null;
 
     // Trade ads created (not always available)
     let adsCreated = null;
@@ -180,8 +188,8 @@ function parseAd(ad, trackedItemId) {
     };
 }
 
-async function fetchAllRequestAds(itemId) {
-    const url = `https://www.rolimons.com/itemtrades/${itemId}`;
+async function fetchAllTradeAds() {
+    const url = 'https://www.rolimons.com/trades';
     let browser, page, html;
     const maxRetries = 3;
     let lastError;
@@ -253,12 +261,12 @@ async function fetchAllRequestAds(itemId) {
         break; // Success, exit retry loop
     } catch (err) {
         lastError = err;
-        console.error(`[AdMonitor][Puppeteer][Attempt ${attempt}/${maxRetries}] Error loading page for item ${itemId}: ${err.name}: ${err.message}`);
+        console.error(`[AdMonitor][Puppeteer][Attempt ${attempt}/${maxRetries}] Error loading main trades page: ${err.name}: ${err.message}`);
         if (browser) {
             try { await browser.close(); } catch (e) {}
         }
         if (attempt === maxRetries) {
-            throw new Error(`[AdMonitor][Puppeteer] Failed to load page for item ${itemId} after ${maxRetries} attempts: ${err.message}`);
+            throw new Error(`[AdMonitor][Puppeteer] Failed to load main trades page after ${maxRetries} attempts: ${err.message}`);
         }
         // Wait a bit before retrying
         await new Promise(res => setTimeout(res, 2000 * attempt));
@@ -274,18 +282,18 @@ async function fetchAllRequestAds(itemId) {
             const requestSideHtml = adElem.find('.ad_side_right').html();
             console.log(`[AdMonitor][DEBUG] Raw HTML of .ad_side_right for first ad:\n${requestSideHtml}`);
         }
-        const ad = parseAd(adElem, itemId);
+        const ad = parseAd(adElem, null); // No specific itemId since we're scanning all ads
         const adId = ad.detailsUrl || Buffer.from(adElem.html()).toString('base64');
         // Log all request-side item IDs for every ad
         const requestItemIds = ad.requestItems.map(img => String(img.id));
-        console.log(`[AdMonitor][DEBUG] (ad #${i}) Tracked item ID: ${String(itemId)}, Request side item IDs: ${JSON.stringify(requestItemIds)}`);
+        console.log(`[AdMonitor][DEBUG] (ad #${i}) Request side item IDs: ${JSON.stringify(requestItemIds)}`);
         ads.push({ ...ad, adId, url, adElemIndex: i });
     });
     return ads;
 }
 
-async function getTradeAdScreenshot(itemId, adElemIndex) {
-    const url = `https://www.rolimons.com/itemtrades/${itemId}`;
+async function getTradeAdScreenshot(adElemIndex) {
+    const url = 'https://www.rolimons.com/trades';
     let browser, page, buffer = null;
     try {
         browser = await puppeteer.launch({
@@ -354,7 +362,7 @@ async function getTradeAdScreenshot(itemId, adElemIndex) {
             buffer = await adHandles[adElemIndex].screenshot({ encoding: 'binary', type: 'png' });
         }
     } catch (err) {
-        console.error(`[AdMonitor][Puppeteer] Error taking screenshot for item ${itemId}:`, err);
+        console.error(`[AdMonitor][Puppeteer] Error taking screenshot for ad ${adElemIndex}:`, err);
         if (err.message && err.message.includes('Failed to launch the browser process')) {
             console.error('[AdMonitor][Puppeteer] Try upgrading your Railway plan, or use a platform with more resources for headless browsers.');
         }
@@ -432,33 +440,40 @@ async function monitorAds(client) {
     setInterval(async () => {
         try {
             const { rows: tracked } = await db.query('SELECT * FROM tracked_items');
+            if (tracked.length === 0) {
+                console.log(`[AdMonitor] No tracked items found, skipping scan`);
+                return;
+            }
+            
+            // Get all tracked item IDs for filtering
+            const trackedItemIds = tracked.map(row => String(row.item_id));
+            console.log(`[AdMonitor] Scanning for ${trackedItemIds.length} tracked items: ${trackedItemIds.join(', ')}`);
+            
+            let allAds;
+            try {
+                allAds = await fetchAllTradeAds();
+            } catch (err) {
+                console.error(`Failed to fetch ads from main trades page:`, err);
+                return;
+            }
+            
+            if (!allAds || allAds.length === 0) {
+                console.log(`[AdMonitor] No ads found on main trades page`);
+                return;
+            }
+            
+            console.log(`[AdMonitor] Found ${allAds.length} ads on main trades page`);
+            
+            // Process each tracked item
             for (const row of tracked) {
                 const { guild_id, channel_id, user_id, item_id, last_ad_id, tracking_started_at } = row;
-                let ads;
-                try {
-                    ads = await fetchAllRequestAds(item_id);
-                } catch (err) {
-                    console.error(`Failed to fetch ads for item ${item_id}:`, err);
-                    continue;
-                }
-                if (!ads || ads.length === 0) {
-                    console.log(`[AdMonitor] No ads found for item ${item_id}`);
-                    continue;
-                }
                 let foundMatch = false;
-                for (const ad of ads) {
-                    // Early check: Skip ads that don't contain the tracked item
+                
+                for (const ad of allAds) {
+                    // Check if the tracked item is on the request side (string-to-string)
                     const hasTrackedItem = ad.requestItems.some(img => String(img.id) === String(item_id));
                     if (!hasTrackedItem) {
-                        console.log(`[AdMonitor][DEBUG] Skipping ad without tracked item ${item_id} in request items: ${ad.requestItems.map(i => i.id).join(', ')}`);
-                        continue;
-                    }
-                    
-                    // Check if the tracked item is on the request side (string-to-string)
-                    const match = ad.requestItems.some(img => String(img.id) === String(item_id));
-                    if (!match) {
-                        console.log(`[AdMonitor][DEBUG] Ad skipped - tracked item ${item_id} not found in request items: ${ad.requestItems.map(i => i.id).join(', ')}`);
-                        continue;
+                        continue; // Skip ads that don't contain this tracked item
                     }
                     
                     // Only post ads newer than tracking_started_at
@@ -560,7 +575,7 @@ async function monitorAds(client) {
                     // Fetch trade ad screenshot
                     let attachment = null;
                     try {
-                        const buffer = await getTradeAdScreenshot(item_id, ad.adElemIndex);
+                        const buffer = await getTradeAdScreenshot(ad.adElemIndex);
                         if (buffer) {
                             attachment = new AttachmentBuilder(buffer, { name: 'trade_ad.png' });
                         }
@@ -657,7 +672,7 @@ async function monitorAds(client) {
         } catch (err) {
             console.error('Error in ad monitor:', err);
         }
-    }, 60000); // 60 seconds
+    }, 15000); // 15 seconds - much faster scanning
 }
 
 module.exports = monitorAds; 
