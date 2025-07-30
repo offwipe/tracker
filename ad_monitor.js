@@ -136,9 +136,9 @@ function parseAd(ad, trackedItemId) {
         // Request value/RAP (now only for tracked item)
         trackedItemValue = trackedItem && trackedItem.value ? parseInt(trackedItem.value.replace(/,/g, '')) : null;
         trackedItemRAP = trackedItem && trackedItem.rap ? parseInt(trackedItem.rap.replace(/,/g, '')) : null;
-        // Value and RAP difference (use only tracked item from request side)
-        valueDiff = (offerValue && trackedItemValue !== null) ? offerValue - trackedItemValue : null;
-        rapDiff = (offerRAP && trackedItemRAP !== null) ? offerRAP - trackedItemRAP : null;
+        // Value and RAP difference (offer - request, so positive means good deal)
+        valueDiff = (offerValue !== null && trackedItemValue !== null) ? offerValue - trackedItemValue : null;
+        rapDiff = (offerRAP !== null && trackedItemRAP !== null) ? offerRAP - trackedItemRAP : null;
     }
 
     // Trade ads created (not always available)
@@ -325,7 +325,19 @@ async function getTradeAdScreenshot(itemId, adElemIndex) {
         
         const adHandles = await page.$$('.mix_item');
         if (adHandles[adElemIndex]) {
-            buffer = await adHandles[adElemIndex].screenshot({ encoding: 'binary', type: 'png' });
+            // Scroll to the specific ad to ensure it's visible
+            await adHandles[adElemIndex].scrollIntoView();
+            await new Promise(resolve => setTimeout(resolve, 1000)); // Wait for any animations
+            buffer = await adHandles[adElemIndex].screenshot({ 
+                encoding: 'binary', 
+                type: 'png',
+                clip: {
+                    x: 0,
+                    y: 0,
+                    width: 800,
+                    height: 600
+                }
+            });
         }
     } catch (err) {
         log(`Error taking screenshot for item ${itemId}: ${err.message}`, 'ERROR');
@@ -449,8 +461,8 @@ async function monitorAds(client) {
                             { name: 'Roblox Trade Link', value: ad.sendTradeUrl ? `[Send Trade](${ad.sendTradeUrl})` : 'N/A', inline: true },
                             { name: 'Trade Ads Created', value: ad.adsCreated || 'N/A', inline: true },
                             { name: 'User Total Value', value: ad.userTotalValue !== null ? ad.userTotalValue.toLocaleString() : 'N/A', inline: true },
-                            { name: 'Value Difference', value: ad.valueDiff !== null ? (ad.valueDiff > 0 ? '+' : '') + ad.valueDiff.toLocaleString() : 'N/A', inline: true },
-                            { name: 'RAP Difference', value: ad.rapDiff !== null ? (ad.rapDiff > 0 ? '+' : '') + ad.rapDiff.toLocaleString() : 'N/A', inline: true },
+                            { name: 'Value Difference', value: ad.valueDiff !== null ? (ad.valueDiff >= 0 ? '+' : '') + ad.valueDiff.toLocaleString() : 'N/A', inline: true },
+                            { name: 'RAP Difference', value: ad.rapDiff !== null ? (ad.rapDiff >= 0 ? '+' : '') + ad.rapDiff.toLocaleString() : 'N/A', inline: true },
                             { name: 'Offered', value: ad.offerItems.map(i => i.name).join(', ') || 'None', inline: false },
                             { name: 'Requested', value: ad.requestItems.map(i => i.name).join(', ') || 'None', inline: false }
                         )
@@ -483,8 +495,8 @@ async function monitorAds(client) {
                                     .addFields(
                                         { name: 'Item', value: ad.trackedItemName || 'Unknown', inline: true },
                                         { name: 'User', value: ad.username, inline: true },
-                                        { name: 'Value Difference', value: ad.valueDiff !== null ? (ad.valueDiff > 0 ? '+' : '') + ad.valueDiff.toLocaleString() : 'N/A', inline: true },
-                                        { name: 'RAP Difference', value: ad.rapDiff !== null ? (ad.rapDiff > 0 ? '+' : '') + ad.rapDiff.toLocaleString() : 'N/A', inline: true },
+                                        { name: 'Value Difference', value: ad.valueDiff !== null ? (ad.valueDiff >= 0 ? '+' : '') + ad.valueDiff.toLocaleString() : 'N/A', inline: true },
+                                        { name: 'RAP Difference', value: ad.rapDiff !== null ? (ad.rapDiff >= 0 ? '+' : '') + ad.rapDiff.toLocaleString() : 'N/A', inline: true },
                                         { name: 'Channel', value: `<#${channel_id}>`, inline: false }
                                     )
                                     .setFooter({ text: 'DM Forwarding - @https://discord.gg/M4wjRvywHH' })
