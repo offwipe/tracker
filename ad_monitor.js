@@ -56,7 +56,7 @@ function parseAd(ad, trackedItemId) {
     if (!time) {
         // Look for any element containing "ago" text
         ad.find('*').each((i, el) => {
-            const text = $(el).text().trim();
+            const text = el.textContent || el.text || '';
             if (text && /ago$/.test(text) && !time) {
                 time = text;
                 return false; // break the loop
