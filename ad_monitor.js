@@ -201,12 +201,21 @@ async function fetchAllRequestAds(itemId) {
         
         const $ = cheerio.load(response.data);
         const ads = [];
-        $('.mix_item').each((i, el) => {
+        const adElements = $('.mix_item');
+        log(`Found ${adElements.length} ad elements for item ${itemId}`);
+        
+        adElements.each((i, el) => {
             const adElem = $(el);
             const ad = parseAd(adElem, itemId);
-            const adId = createAdHash(ad); // Use the new hash function
-            ads.push({ ...ad, adId, url, adElemIndex: i });
+            if (ad.username && ad.time) {
+                const adId = createAdHash(ad); // Use the new hash function
+                ads.push({ ...ad, adId, url, adElemIndex: i });
+                log(`Parsed ad ${i}: username=${ad.username}, time=${ad.time}`);
+            } else {
+                log(`Skipping ad ${i}: missing username or time`);
+            }
         });
+        log(`Returning ${ads.length} valid ads for item ${itemId}`);
         return ads;
     } catch (err) {
         log(`Error loading page for item ${itemId}: ${err.message}`, 'ERROR');
@@ -414,6 +423,8 @@ async function monitorAds(client) {
                         log(`Skipping ad without valid time: "${ad.time}"`);
                         continue;
                     }
+                    
+                    log(`Processing ad: username=${ad.username}, time="${ad.time}", parsedTime=${adTime}`);
                     
                     // Check if the tracked item is on the request side (string-to-string)
                     const match = ad.requestItems.some(img => String(img.id) === String(item_id));
