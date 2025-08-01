@@ -190,6 +190,7 @@ async function fetchAllRequestAds(itemId) {
     try {
         browser = await puppeteer.launch({
             headless: true,
+            executablePath: '/usr/bin/chromium-browser',
             args: [
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
@@ -247,6 +248,7 @@ async function getTradeAdScreenshot(adData, itemId) {
     try {
         browser = await puppeteer.launch({
             headless: true,
+            executablePath: '/usr/bin/chromium-browser',
             args: [
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
