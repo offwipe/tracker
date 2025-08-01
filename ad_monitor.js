@@ -1,5 +1,4 @@
 const { EmbedBuilder, AttachmentBuilder } = require('discord.js');
-const puppeteer = require('puppeteer');
 const cheerio = require('cheerio');
 const crypto = require('crypto');
 const axios = require('axios');
@@ -186,18 +185,22 @@ function parseAd(ad, trackedItemId) {
 
 async function fetchAllRequestAds(itemId) {
     const url = `https://www.rolimons.com/itemtrades/${itemId}`;
-    try {
-        const response = await axios.get(url, {
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5',
-                'Accept-Encoding': 'gzip, deflate',
-                'Connection': 'keep-alive',
-                'Upgrade-Insecure-Requests': '1'
-            },
-            timeout: 30000
-        });
+    
+    // Retry logic for network issues
+    for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+            const response = await axios.get(url, {
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                    'Accept-Language': 'en-US,en;q=0.5',
+                    'Accept-Encoding': 'gzip, deflate',
+                    'Connection': 'keep-alive',
+                    'Upgrade-Insecure-Requests': '1'
+                },
+                timeout: 15000, // Reduced timeout
+                maxRedirects: 5
+            });
         
         const $ = cheerio.load(response.data);
         const ads = [];
@@ -215,140 +218,25 @@ async function fetchAllRequestAds(itemId) {
                 log(`Skipping ad ${i}: missing username or time`);
             }
         });
-        log(`Returning ${ads.length} valid ads for item ${itemId}`);
+                log(`Returning ${ads.length} valid ads for item ${itemId}`);
         return ads;
     } catch (err) {
-        log(`Error loading page for item ${itemId}: ${err.message}`, 'ERROR');
+        if (err.code === 'ECONNRESET' || err.code === 'ENOTFOUND' || err.message.includes('socket hang up')) {
+            log(`Network error for item ${itemId} (attempt ${attempt}/3): ${err.message}`, 'WARN');
+            if (attempt < 3) {
+                log(`Retrying in 2 seconds...`);
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                continue;
+            }
+        } else {
+            log(`Error loading page for item ${itemId} (attempt ${attempt}/3): ${err.message}`, 'ERROR');
+        }
         return [];
     }
 }
-
-async function getTradeAdScreenshot(itemId, adData) {
-    const url = `https://www.rolimons.com/itemtrades/${itemId}`;
-    let browser, page, buffer = null;
-    try {
-        browser = await puppeteer.launch({
-            args: [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-gpu',
-                '--disable-web-security',
-                '--disable-features=VizDisplayCompositor',
-                '--disable-background-timer-throttling',
-                '--disable-backgrounding-occluded-windows',
-                '--disable-renderer-backgrounding',
-                '--disable-ipc-flooding-protection',
-                '--disable-default-apps',
-                '--disable-extensions',
-                '--disable-plugins',
-                '--disable-images',
-                '--disable-javascript',
-                '--no-first-run',
-                '--no-default-browser-check',
-                '--disable-sync',
-                '--disable-translate',
-                '--hide-scrollbars',
-                '--mute-audio',
-                '--no-zygote',
-                '--single-process'
-            ],
-            headless: true,
-            ignoreDefaultArgs: ['--disable-extensions', '--disable-plugins', '--disable-images', '--disable-javascript', '--disable-background-timer-throttling', '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding'],
-            timeout: 90000
-        });
-        page = await browser.newPage();
-        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
-        await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
-        await page.waitForSelector('.mix_item', { timeout: 10000 });
-        
-        // Wait for images to load and handle lazy loading
-        await page.evaluate(async () => {
-            // Remove cookie/privacy popups first
-            const btns = Array.from(document.querySelectorAll('button, [role="button"]'));
-            btns.forEach(btn => {
-                if (/accept|close|agree|dismiss|consent/i.test(btn.textContent)) btn.click();
-            });
-            const banners = document.querySelectorAll('[id*="consent"], [id*="cookie"], [class*="cookie"], [class*="consent"], [class*="privacy"], .qc-cmp2-container, .qc-cmp2-summary, .qc-cmp2-footer, .qc-cmp2-main, .qc-cmp2-ui, .qc-cmp2-persistent-link, .qc-cmp2-dialog, .qc-cmp2-custom-popup, .qc-cmp2-overlay, .qc-cmp2-banner, .qc-cmp2-summary-info, .qc-cmp2-summary-buttons');
-            banners.forEach(b => b.remove());
-            Array.from(document.querySelectorAll('div, span, p')).forEach(el => {
-                if (/privacy|cookie/i.test(el.textContent)) el.remove();
-            });
-            
-            // Force load all lazy-loaded images
-            const lazyImages = document.querySelectorAll('img[data-src]');
-            for (const img of lazyImages) {
-                if (img.dataset.src && !img.dataset.src.includes('transparent-square') && !img.dataset.src.includes('empty_trade_slot')) {
-                    img.src = img.dataset.src;
-                    img.classList.remove('lazyload');
-                    img.classList.add('lazyloaded');
-                }
-            }
-            
-            // Wait for images to load
-            const imagePromises = Array.from(lazyImages).map(img => {
-                return new Promise((resolve) => {
-                    if (img.complete) {
-                        resolve();
-                    } else {
-                        img.onload = () => resolve();
-                        img.onerror = () => resolve(); // Don't fail if image fails to load
-                    }
-                });
-            });
-            
-            await Promise.all(imagePromises);
-            
-            // Additional wait for any remaining lazy loading
-            await new Promise(resolve => setTimeout(resolve, 2000));
-        });
-        
-        // Find the specific ad by matching username and time
-        const targetAd = await page.evaluate((adData) => {
-            const ads = Array.from(document.querySelectorAll('.mix_item'));
-            for (let i = 0; i < ads.length; i++) {
-                const ad = ads[i];
-                const username = ad.querySelector('.ad_creator_name')?.textContent?.trim();
-                const time = ad.querySelector('.trade-ad-timestamp')?.textContent?.trim() || 
-                           ad.querySelector('[class*="timestamp"]')?.textContent?.trim() ||
-                           ad.querySelector('[class*="time"]')?.textContent?.trim();
-                
-                if (username === adData.username && time === adData.time) {
-                    return i;
-                }
-            }
-            return -1;
-        }, adData);
-        
-        if (targetAd !== -1) {
-            const adHandles = await page.$$('.mix_item');
-            if (adHandles[targetAd]) {
-                // Scroll to the specific ad to ensure it's visible
-                await adHandles[targetAd].scrollIntoView();
-                await new Promise(resolve => setTimeout(resolve, 1000)); // Wait for any animations
-                buffer = await adHandles[targetAd].screenshot({ 
-                    encoding: 'binary', 
-                    type: 'png',
-                    clip: {
-                        x: 0,
-                        y: 0,
-                        width: 800,
-                        height: 600
-                    }
-                });
-            }
-        } else {
-            log(`Could not find ad for screenshot: username=${adData.username}, time=${adData.time}`, 'WARN');
-        }
-    } catch (err) {
-        log(`Error taking screenshot for item ${itemId}: ${err.message}`, 'ERROR');
-        if (err.message && err.message.includes('Failed to launch the browser process')) {
-            log('Try upgrading your Railway plan, or use a platform with more resources for headless browsers.', 'ERROR');
-        }
-    }
-    if (browser) await browser.close();
-    return buffer;
 }
+
+
 
 function parseAdTime(adTimeStr) {
     // Try to parse "x minutes ago", "x seconds ago", or ISO string
@@ -505,27 +393,8 @@ async function monitorAds(client) {
                     const channel = await client.channels.fetch(channel_id).catch(() => null);
                     if (!channel) continue;
 
-                    // Fetch trade ad screenshot (optional - won't block posting if it fails)
-                    let attachment = null;
-                    // Only try screenshots for very fresh ads (under 10 seconds) to reduce load
-                    const adTime = parseAdTime(ad.time);
-                    const currentTime = new Date();
-                    const tenSecondsAgo = new Date(currentTime.getTime() - 10 * 1000);
-                    
-                    if (adTime && adTime > tenSecondsAgo) {
-                        try {
-                            log(`Taking screenshot for item ${item_id}, username: ${ad.username}, time: "${ad.time}"`);
-                            const buffer = await getTradeAdScreenshot(item_id, { username: ad.username, time: ad.time });
-                            if (buffer) {
-                                attachment = new AttachmentBuilder(buffer, { name: 'trade_ad.png' });
-                                log(`Screenshot captured successfully for item ${item_id}, username: ${ad.username}`);
-                            }
-                        } catch (err) {
-                            log(`Screenshot error: ${err.message}`, 'ERROR');
-                        }
-                    } else {
-                        log(`Skipping screenshot for older ad: ${ad.time}`);
-                    }
+                                         // Screenshots disabled to prevent Puppeteer errors
+                     let attachment = null;
 
                     // Determine embed color based on value difference
                     let embedColor = 0x2ecc40; // green by default
@@ -555,16 +424,12 @@ async function monitorAds(client) {
                         embed.setThumbnail(ad.userImg);
                     }
 
-                    // Send to channel
-                    const channelMessage = {
-                        content: `<@${user_id}> New trade request ad for item ID ${item_id}.`,
-                        embeds: [embed]
-                    };
-                    if (attachment) {
-                        channelMessage.files = [attachment];
-                        channelMessage.embeds = [embed.setImage('attachment://trade_ad.png')];
-                    }
-                    await channel.send(channelMessage);
+                                         // Send to channel
+                     const channelMessage = {
+                         content: `<@${user_id}> New trade request ad for item ID ${item_id}.`,
+                         embeds: [embed]
+                     };
+                     await channel.send(channelMessage);
 
                     // Check if user has DM forwarding enabled and send DM
                     if (row.forward_to_dms) {
@@ -585,14 +450,10 @@ async function monitorAds(client) {
                                     .setFooter({ text: 'DM Forwarding - @https://discord.gg/M4wjRvywHH' })
                                     .setTimestamp();
 
-                                const dmMessage = {
-                                    content: `DM Forwarding: New trade ad for your tracked item ID **${item_id}**`,
-                                    embeds: [dmEmbed]
-                                };
-                                if (attachment) {
-                                    dmMessage.files = [attachment];
-                                    dmMessage.embeds = [dmEmbed.setImage('attachment://trade_ad.png')];
-                                }
+                                                                 const dmMessage = {
+                                     content: `DM Forwarding: New trade ad for your tracked item ID **${item_id}**`,
+                                     embeds: [dmEmbed]
+                                 };
                                 
                                 await user.send(dmMessage);
                                 log(`DM sent to user ${user_id} for item ${item_id}`);
