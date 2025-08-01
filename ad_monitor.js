@@ -2,6 +2,7 @@ const { EmbedBuilder, AttachmentBuilder } = require('discord.js');
 const puppeteer = require('puppeteer');
 const cheerio = require('cheerio');
 const crypto = require('crypto');
+const axios = require('axios');
 const db = require('./db');
 const PLACEHOLDER_IMAGES = [
   '/images/transparent-square-110.png',
@@ -185,103 +186,32 @@ function parseAd(ad, trackedItemId) {
 
 async function fetchAllRequestAds(itemId) {
     const url = `https://www.rolimons.com/itemtrades/${itemId}`;
-    let browser, page, html;
     try {
-        browser = await puppeteer.launch({
-            args: [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-gpu',
-                '--disable-web-security',
-                '--disable-features=VizDisplayCompositor',
-                '--disable-background-timer-throttling',
-                '--disable-backgrounding-occluded-windows',
-                '--disable-renderer-backgrounding',
-                '--disable-ipc-flooding-protection',
-                '--disable-default-apps',
-                '--disable-extensions',
-                '--disable-plugins',
-                '--disable-images',
-                '--disable-javascript',
-                '--no-first-run',
-                '--no-default-browser-check',
-                '--disable-sync',
-                '--disable-translate',
-                '--hide-scrollbars',
-                '--mute-audio',
-                '--no-zygote',
-                '--single-process'
-            ],
-            headless: true,
-            ignoreDefaultArgs: ['--disable-extensions', '--disable-plugins', '--disable-images', '--disable-javascript', '--disable-background-timer-throttling', '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding'],
-            timeout: 90000
-        });
-        page = await browser.newPage();
-        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
-        await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
-        await page.waitForSelector('.mix_item', { timeout: 10000 });
-        
-        // Wait for images to load and handle lazy loading
-        await page.evaluate(async () => {
-            // Remove cookie/privacy popups first
-            const btns = Array.from(document.querySelectorAll('button, [role="button"]'));
-            btns.forEach(btn => {
-                if (/accept|close|agree|dismiss|consent/i.test(btn.textContent)) btn.click();
-            });
-            const banners = document.querySelectorAll('[id*="consent"], [id*="cookie"], [class*="cookie"], [class*="consent"], [class*="privacy"], .qc-cmp2-container, .qc-cmp2-summary, .qc-cmp2-footer, .qc-cmp2-main, .qc-cmp2-ui, .qc-cmp2-persistent-link, .qc-cmp2-dialog, .qc-cmp2-custom-popup, .qc-cmp2-overlay, .qc-cmp2-banner, .qc-cmp2-summary-info, .qc-cmp2-summary-buttons');
-            banners.forEach(b => b.remove());
-            Array.from(document.querySelectorAll('div, span, p')).forEach(el => {
-                if (/privacy|cookie/i.test(el.textContent)) el.remove();
-            });
-            
-            // Force load all lazy-loaded images
-            const lazyImages = document.querySelectorAll('img[data-src]');
-            for (const img of lazyImages) {
-                if (img.dataset.src && !img.dataset.src.includes('transparent-square') && !img.dataset.src.includes('empty_trade_slot')) {
-                    img.src = img.dataset.src;
-                    img.classList.remove('lazyload');
-                    img.classList.add('lazyloaded');
-                }
-            }
-            
-            // Wait for images to load
-            const imagePromises = Array.from(lazyImages).map(img => {
-                return new Promise((resolve) => {
-                    if (img.complete) {
-                        resolve();
-                    } else {
-                        img.onload = () => resolve();
-                        img.onerror = () => resolve(); // Don't fail if image fails to load
-                    }
-                });
-            });
-            
-            await Promise.all(imagePromises);
-            
-            // Additional wait for any remaining lazy loading
-            await new Promise(resolve => setTimeout(resolve, 2000));
+        const response = await axios.get(url, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Accept-Encoding': 'gzip, deflate',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1'
+            },
+            timeout: 30000
         });
         
-        html = await page.content();
+        const $ = cheerio.load(response.data);
+        const ads = [];
+        $('.mix_item').each((i, el) => {
+            const adElem = $(el);
+            const ad = parseAd(adElem, itemId);
+            const adId = createAdHash(ad); // Use the new hash function
+            ads.push({ ...ad, adId, url, adElemIndex: i });
+        });
+        return ads;
     } catch (err) {
         log(`Error loading page for item ${itemId}: ${err.message}`, 'ERROR');
-        if (err.message && err.message.includes('Failed to launch the browser process')) {
-            log('Try upgrading your Railway plan, or use a platform with more resources for headless browsers.', 'ERROR');
-        }
-        if (browser) await browser.close();
         return [];
     }
-    if (browser) await browser.close();
-    const $ = cheerio.load(html);
-    const ads = [];
-    $('.mix_item').each((i, el) => {
-        const adElem = $(el);
-        const ad = parseAd(adElem, itemId);
-        const adId = createAdHash(ad); // Use the new hash function
-        ads.push({ ...ad, adId, url, adElemIndex: i });
-    });
-    return ads;
 }
 
 async function getTradeAdScreenshot(itemId, adData) {
@@ -564,17 +494,26 @@ async function monitorAds(client) {
                     const channel = await client.channels.fetch(channel_id).catch(() => null);
                     if (!channel) continue;
 
-                    // Fetch trade ad screenshot
+                    // Fetch trade ad screenshot (optional - won't block posting if it fails)
                     let attachment = null;
-                    try {
-                        log(`Taking screenshot for item ${item_id}, username: ${ad.username}, time: "${ad.time}"`);
-                        const buffer = await getTradeAdScreenshot(item_id, { username: ad.username, time: ad.time });
-                        if (buffer) {
-                            attachment = new AttachmentBuilder(buffer, { name: 'trade_ad.png' });
-                            log(`Screenshot captured successfully for item ${item_id}, username: ${ad.username}`);
+                    // Only try screenshots for very fresh ads (under 10 seconds) to reduce load
+                    const adTime = parseAdTime(ad.time);
+                    const currentTime = new Date();
+                    const tenSecondsAgo = new Date(currentTime.getTime() - 10 * 1000);
+                    
+                    if (adTime && adTime > tenSecondsAgo) {
+                        try {
+                            log(`Taking screenshot for item ${item_id}, username: ${ad.username}, time: "${ad.time}"`);
+                            const buffer = await getTradeAdScreenshot(item_id, { username: ad.username, time: ad.time });
+                            if (buffer) {
+                                attachment = new AttachmentBuilder(buffer, { name: 'trade_ad.png' });
+                                log(`Screenshot captured successfully for item ${item_id}, username: ${ad.username}`);
+                            }
+                        } catch (err) {
+                            log(`Screenshot error: ${err.message}`, 'ERROR');
                         }
-                    } catch (err) {
-                        log(`Screenshot error: ${err.message}`, 'ERROR');
+                    } else {
+                        log(`Skipping screenshot for older ad: ${ad.time}`);
                     }
 
                     // Determine embed color based on value difference
