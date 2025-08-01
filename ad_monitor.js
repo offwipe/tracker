@@ -234,7 +234,6 @@ async function fetchAllRequestAds(itemId) {
         return [];
     }
 }
-}
 
 
 
