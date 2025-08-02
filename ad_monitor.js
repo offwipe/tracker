@@ -333,6 +333,7 @@ function parseAdTime(adTimeStr) {
     if (/ago$/.test(adTimeStr)) {
         const now = new Date();
         const secMatch = adTimeStr.match(/(\d+)\s*second/);
+        const minMatch = adTimeStr.match(/(\d+)\s*minute/);
         
         // Accept seconds under 60 (1 minute)
         if (secMatch) {
@@ -341,6 +342,17 @@ function parseAdTime(adTimeStr) {
                 return null;
             }
             return new Date(now.getTime() - seconds * 1000);
+        }
+        
+        // Accept exactly 1 minute (60-119 seconds show as "1 minute ago")
+        if (minMatch) {
+            const minutes = parseInt(minMatch[1]);
+            if (minutes === 1) {
+                // 1 minute ago = between 60-119 seconds, so use 90 seconds as average
+                return new Date(now.getTime() - 90 * 1000);
+            }
+            // Reject 2+ minutes
+            return null;
         }
         
         // If it ends with "ago" but doesn't match our patterns, reject it
@@ -422,11 +434,19 @@ async function monitorAds(client) {
                 if (ad.time) {
                     const timeText = ad.time.toLowerCase();
                     
-                    // Skip any ads with "hour", "hours", "day", "days" in the timestamp (allow minutes now)
+                    // Skip any ads with "hour", "hours", "day", "days" in the timestamp
                     if (timeText.includes('hour') || timeText.includes('hours') || 
                         timeText.includes('day') || timeText.includes('days')) {
                         log(`Skipping ad with old timestamp: ${ad.time}`);
                         continue;
+                    }
+                    // Skip ads with 2+ minutes (but allow "1 minute ago")
+                    if (timeText.includes('minute')) {
+                        const minuteMatch = timeText.match(/(\d+)\s*minute/);
+                        if (minuteMatch && parseInt(minuteMatch[1]) > 1) {
+                            log(`Skipping ad with old minute timestamp: ${ad.time} (${minuteMatch[1]} minutes > 1)`);
+                            continue;
+                        }
                     }
                     // Only accept ads with seconds <= 60
                     if (timeText.includes('second')) {
