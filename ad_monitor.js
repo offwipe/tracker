@@ -280,48 +280,14 @@ async function getTradeAdScreenshot(adData, itemId) {
         const adElement = await page.$(adSelector);
         
         if (adElement) {
-            // Get the bounding box of the ad element
-            const boundingBox = await adElement.boundingBox();
+            // Take a direct screenshot of the ad element
+            const screenshot = await adElement.screenshot({
+                type: 'png',
+                encoding: 'binary'
+            });
             
-            if (boundingBox) {
-                // Take a screenshot of the entire page first
-                const fullScreenshot = await page.screenshot({
-                    type: 'png',
-                    encoding: 'binary'
-                });
-                
-                // Create a new page to crop the screenshot
-                const cropPage = await browser.newPage();
-                await cropPage.setViewport({ width: 1920, height: 1080 });
-                
-                // Set the screenshot as the page content
-                await cropPage.setContent(`
-                    <html>
-                        <body style="margin: 0; padding: 0;">
-                            <img src="data:image/png;base64,${fullScreenshot.toString('base64')}" 
-                                 style="position: absolute; top: 0; left: 0; width: 1920px; height: auto;">
-                        </body>
-                    </html>
-                `);
-                
-                // Crop to the specific ad area with some padding
-                const padding = 10;
-                const cropArea = {
-                    x: Math.max(0, boundingBox.x - padding),
-                    y: Math.max(0, boundingBox.y - padding),
-                    width: Math.min(1920 - boundingBox.x + padding, boundingBox.width + (padding * 2)),
-                    height: boundingBox.height + (padding * 2)
-                };
-                
-                const croppedScreenshot = await cropPage.screenshot({
-                    clip: cropArea,
-                    type: 'png',
-                    encoding: 'binary'
-                });
-                
-                await cropPage.close();
-                return new AttachmentBuilder(croppedScreenshot, { name: 'trade_ad.png' });
-            }
+            log(`Successfully took screenshot of ad element ${adElemIndex}`);
+            return new AttachmentBuilder(screenshot, { name: 'trade_ad.png' });
         }
         
         // Fallback: try to find by username if index method fails
@@ -329,45 +295,16 @@ async function getTradeAdScreenshot(adData, itemId) {
         const usernameElement = await page.$(usernameSelector);
         
         if (usernameElement) {
-            const boundingBox = await usernameElement.boundingBox();
+            const screenshot = await usernameElement.screenshot({
+                type: 'png',
+                encoding: 'binary'
+            });
             
-            if (boundingBox) {
-                const fullScreenshot = await page.screenshot({
-                    type: 'png',
-                    encoding: 'binary'
-                });
-                
-                const cropPage = await browser.newPage();
-                await cropPage.setViewport({ width: 1920, height: 1080 });
-                
-                await cropPage.setContent(`
-                    <html>
-                        <body style="margin: 0; padding: 0;">
-                            <img src="data:image/png;base64,${fullScreenshot.toString('base64')}" 
-                                 style="position: absolute; top: 0; left: 0; width: 1920px; height: auto;">
-                        </body>
-                    </html>
-                `);
-                
-                const padding = 10;
-                const cropArea = {
-                    x: Math.max(0, boundingBox.x - padding),
-                    y: Math.max(0, boundingBox.y - padding),
-                    width: Math.min(1920 - boundingBox.x + padding, boundingBox.width + (padding * 2)),
-                    height: boundingBox.height + (padding * 2)
-                };
-                
-                const croppedScreenshot = await cropPage.screenshot({
-                    clip: cropArea,
-                    type: 'png',
-                    encoding: 'binary'
-                });
-                
-                await cropPage.close();
-                return new AttachmentBuilder(croppedScreenshot, { name: 'trade_ad.png' });
-            }
+            log(`Successfully took screenshot using username fallback for ${username}`);
+            return new AttachmentBuilder(screenshot, { name: 'trade_ad.png' });
         }
         
+        log(`Could not find ad element for screenshot - username: ${username}, index: ${adElemIndex}`);
         return null;
     } catch (err) {
         log(`Error taking screenshot for item ${itemId}: ${err.message}`, 'ERROR');
@@ -591,8 +528,15 @@ async function monitorAds(client) {
                     )
                     .setFooter({ text: '@https://discord.gg/M4wjRvywHH' })
                     .setTimestamp();
+                
+                // Set user image as thumbnail if available
                 if (ad.userImg && ad.userImg.startsWith('http')) {
                     embed.setThumbnail(ad.userImg);
+                }
+                
+                // Set screenshot as embed image if available
+                if (attachment) {
+                    embed.setImage('attachment://trade_ad.png');
                 }
 
                 // Send to channel
