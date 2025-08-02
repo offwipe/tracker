@@ -308,9 +308,11 @@ async function getTradeAdScreenshot(adData, itemId) {
             return null;
         }, username, time);
         
-        if (adElement && !adElement._remoteObject.value) {
+        // Check if we found a valid element
+        const elementHandle = await adElement.asElement();
+        if (elementHandle) {
             // If we found the ad, take a screenshot
-            const screenshot = await adElement.screenshot({
+            const screenshot = await elementHandle.screenshot({
                 type: 'png',
                 encoding: 'binary'
             });
@@ -527,12 +529,12 @@ async function monitorAds(client) {
                 // Take screenshot of the ad (increased time window to catch more ads)
                 let attachment = null;
                 try {
-                    // Take screenshots for ads under 50 seconds old (increased to match 1-minute limit)
-                    const adTime = parseAdTime(ad.time);
-                    const currentTime = new Date();
-                    const fiftySecondsAgo = new Date(currentTime.getTime() - 50 * 1000);
-                    
-                    if (adTime && adTime > fiftySecondsAgo) {
+                                         // Take screenshots for ads under 60 seconds old (match the 1-minute ad validity)
+                     const adTime = parseAdTime(ad.time);
+                     const currentTime = new Date();
+                     const sixtySecondsAgo = new Date(currentTime.getTime() - 60 * 1000);
+                     
+                     if (adTime && adTime > sixtySecondsAgo) {
                         log(`Taking screenshot for fresh ad (${ad.time})`);
                         attachment = await getTradeAdScreenshot({ 
                             username: ad.username, 
