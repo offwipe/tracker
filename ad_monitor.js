@@ -29,7 +29,8 @@ function log(message, level = 'INFO') {
 
 // Create a hash of ad content for duplicate detection
 function createAdHash(ad) {
-    const content = `${ad.username}-${ad.time}-${ad.offerItems.map(i => i.name).join(',')}-${ad.requestItems.map(i => i.name).join(',')}`;
+    // Include more specific data to prevent false duplicates
+    const content = `${ad.username}-${ad.time}-${ad.offerItems.map(i => i.name).join(',')}-${ad.requestItems.map(i => i.name).join(',')}-${ad.offerValue}-${ad.requestValue}`;
     return crypto.createHash('md5').update(content).digest('hex');
 }
 
@@ -272,39 +273,53 @@ async function getTradeAdScreenshot(adData, itemId) {
         
         await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
         
+        // Handle cookie consent popup if it appears
+        try {
+            await page.waitForSelector('#onetrust-accept-btn-handler', { timeout: 5000 });
+            await page.click('#onetrust-accept-btn-handler');
+            log('Clicked cookie consent button');
+        } catch (cookieErr) {
+            // Cookie popup might not appear, that's fine
+        }
+        
         // Wait for ads to load
         await page.waitForSelector('.mix_item', { timeout: 10000 });
         
-        // Find the specific ad by index (most reliable method)
-        const adSelector = `.mix_item:nth-child(${adElemIndex + 1})`;
-        const adElement = await page.$(adSelector);
+        // Use JavaScript to find the exact ad by username and time
+        const adElement = await page.evaluateHandle((targetUsername, targetTime) => {
+            const ads = document.querySelectorAll('.mix_item');
+            for (let i = 0; i < ads.length; i++) {
+                const ad = ads[i];
+                const usernameElement = ad.querySelector('.ad_creator_name');
+                const timeElement = ad.querySelector('.trade-ad-timestamp') || 
+                                  ad.querySelector('[class*="timestamp"]') ||
+                                  ad.querySelector('[class*="time"]');
+                
+                if (usernameElement && timeElement) {
+                    const username = usernameElement.textContent.trim();
+                    const time = timeElement.textContent.trim();
+                    
+                    // Match by username and approximate time
+                    if (username === targetUsername && time === targetTime) {
+                        return ad;
+                    }
+                }
+            }
+            return null;
+        }, username, time);
         
-        if (adElement) {
-            // Take a direct screenshot of the ad element
+        if (adElement && !adElement._remoteObject.value) {
+            // If we found the ad, take a screenshot
             const screenshot = await adElement.screenshot({
                 type: 'png',
                 encoding: 'binary'
             });
             
-            log(`Successfully took screenshot of ad element ${adElemIndex}`);
+            log(`Successfully took screenshot for ${username} at ${time}`);
             return new AttachmentBuilder(screenshot, { name: 'trade_ad.png' });
         }
         
-        // Fallback: try to find by username if index method fails
-        const usernameSelector = `.mix_item:has(.ad_creator_name:contains("${username}"))`;
-        const usernameElement = await page.$(usernameSelector);
-        
-        if (usernameElement) {
-            const screenshot = await usernameElement.screenshot({
-                type: 'png',
-                encoding: 'binary'
-            });
-            
-            log(`Successfully took screenshot using username fallback for ${username}`);
-            return new AttachmentBuilder(screenshot, { name: 'trade_ad.png' });
-        }
-        
-        log(`Could not find ad element for screenshot - username: ${username}, index: ${adElemIndex}`);
+        log(`Could not find ad element for screenshot - username: ${username}, time: ${time}`);
         return null;
     } catch (err) {
         log(`Error taking screenshot for item ${itemId}: ${err.message}`, 'ERROR');
@@ -476,13 +491,21 @@ async function monitorAds(client) {
                     continue;
                 }
                 
-                // Check for content hash duplicates (same content within 1 hour)
-                const contentHashKey = `${ad.username}-${item_id}-${ad.adId}`;
-                const lastContentHashTime = adContentCache.get(contentHashKey);
-                if (lastContentHashTime && (now.getTime() - lastContentHashTime.getTime()) < 3600000) { // 1 hour
-                    log(`Skipping duplicate content hash from user ${ad.username} for item ${item_id} within 1 hour`);
-                    continue;
-                }
+                                 // Check for content hash duplicates (same content within 1 hour)
+                 const contentHashKey = `${ad.username}-${item_id}-${ad.adId}`;
+                 const lastContentHashTime = adContentCache.get(contentHashKey);
+                 if (lastContentHashTime && (now.getTime() - lastContentHashTime.getTime()) < 3600000) { // 1 hour
+                     log(`Skipping duplicate content hash from user ${ad.username} for item ${item_id} within 1 hour`);
+                     continue;
+                 }
+                 
+                 // Additional check: same username + time + item combination (prevents exact duplicates)
+                 const exactDuplicateKey = `${ad.username}-${ad.time}-${item_id}`;
+                 const lastExactDuplicate = adContentCache.get(exactDuplicateKey);
+                 if (lastExactDuplicate) {
+                     log(`Skipping exact duplicate: ${ad.username} at ${ad.time} for item ${item_id}`);
+                     continue;
+                 }
                 
                 // Prevent duplicate posts (in-memory and DB)
                 if (ad.adId === last_ad_id || postedAdIds.has(ad.adId)) {
@@ -492,10 +515,11 @@ async function monitorAds(client) {
                 
                 log(`Posting new ad for item ${item_id} from user ${ad.username}`);
                 
-                // Update all caches
-                userDuplicateCache.set(userDuplicateKey, now);
-                adContentCache.set(contentHashKey, now);
-                postedAdIds.add(ad.adId);
+                                 // Update all caches
+                 userDuplicateCache.set(userDuplicateKey, now);
+                 adContentCache.set(contentHashKey, now);
+                 adContentCache.set(exactDuplicateKey, now); // Cache the exact duplicate key
+                 postedAdIds.add(ad.adId);
                 
                 const channel = await client.channels.fetch(channel_id).catch(() => null);
                 if (!channel) continue;
