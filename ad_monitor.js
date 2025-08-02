@@ -33,7 +33,7 @@ function createAdHash(ad) {
     return crypto.createHash('md5').update(content).digest('hex');
 }
 
-function parseAd(ad, trackedItemId) {
+function parseAd(ad) {
     // Username and profile
     const userAnchor = ad.find('.ad_creator_name');
     const username = userAnchor.text().trim();
@@ -139,15 +139,19 @@ function parseAd(ad, trackedItemId) {
     let valueDiff = null;
     let rapDiff = null;
     
-    if (trackedItemId) {
+    // Find any tracked item in the request items
+    const trackedItemIds = ['10159600649', '1678356850', '1402433072', '583721561', '9910420'];
+    for (const trackedItemId of trackedItemIds) {
         trackedItem = requestItems.find(i => i.id === trackedItemId) || requestItems.find(i => i.onclick && i.onclick.includes(trackedItemId));
-        
-        // Request value/RAP (now only for tracked item)
-        trackedItemValue = trackedItem && trackedItem.value ? parseInt(trackedItem.value.replace(/,/g, '')) : null;
-        trackedItemRAP = trackedItem && trackedItem.rap ? parseInt(trackedItem.rap.replace(/,/g, '')) : null;
-        // Value and RAP difference (offer - request, so positive means good deal)
-        valueDiff = (offerValue !== null && trackedItemValue !== null) ? offerValue - trackedItemValue : null;
-        rapDiff = (offerRAP !== null && trackedItemRAP !== null) ? offerRAP - trackedItemRAP : null;
+        if (trackedItem) {
+            // Request value/RAP (now only for tracked item)
+            trackedItemValue = trackedItem && trackedItem.value ? parseInt(trackedItem.value.replace(/,/g, '')) : null;
+            trackedItemRAP = trackedItem && trackedItem.rap ? parseInt(trackedItem.rap.replace(/,/g, '')) : null;
+            // Value and RAP difference (offer - request, so positive means good deal)
+            valueDiff = (offerValue !== null && trackedItemValue !== null) ? offerValue - trackedItemValue : null;
+            rapDiff = (offerRAP !== null && trackedItemRAP !== null) ? offerRAP - trackedItemRAP : null;
+            break;
+        }
     }
 
     // Trade ads created (not always available)
@@ -183,8 +187,8 @@ function parseAd(ad, trackedItemId) {
     };
 }
 
-async function fetchAllRequestAds(itemId) {
-    const url = `https://www.rolimons.com/itemtrades/${itemId}`;
+async function fetchAllRequestAds() {
+    const url = `https://www.rolimons.com/trades`;
     
     let browser;
     try {
@@ -214,13 +218,13 @@ async function fetchAllRequestAds(itemId) {
         const $ = cheerio.load(html);
         const ads = [];
         const adElements = $('.mix_item');
-        log(`Found ${adElements.length} ad elements for item ${itemId}`);
+        log(`Found ${adElements.length} total ad elements on trades page`);
         
         adElements.each((i, el) => {
             const adElem = $(el);
-            const ad = parseAd(adElem, itemId);
+            const ad = parseAd(adElem);
             if (ad.username && ad.time) {
-                const adId = createAdHash(ad); // Use the new hash function
+                const adId = createAdHash(ad);
                 ads.push({ ...ad, adId, url, adElemIndex: i });
                 log(`Parsed ad ${i}: username=${ad.username}, time=${ad.time}`);
             } else {
@@ -228,10 +232,10 @@ async function fetchAllRequestAds(itemId) {
             }
         });
         
-        log(`Returning ${ads.length} valid ads for item ${itemId}`);
+        log(`Returning ${ads.length} valid ads from trades page`);
         return ads;
     } catch (err) {
-        log(`Error loading page for item ${itemId}: ${err.message}`, 'ERROR');
+        log(`Error loading trades page: ${err.message}`, 'ERROR');
         return [];
     } finally {
         if (browser) {
@@ -346,203 +350,209 @@ async function monitorAds(client) {
     setInterval(async () => {
         try {
             const { rows: tracked } = await db.query('SELECT * FROM tracked_items');
-            for (const row of tracked) {
+            let ads;
+            try {
+                ads = await fetchAllRequestAds();
+            } catch (err) {
+                log(`Failed to fetch ads from trades page: ${err.message}`, 'ERROR');
+                return;
+            }
+            if (!ads || ads.length === 0) {
+                log(`No ads found on trades page`);
+                return;
+            }
+            
+            // Process all ads and find matches for tracked items
+            for (const ad of ads) {
+                // First check if the ad is fresh enough before processing
+                let adTime = parseAdTime(ad.time);
+                if (!adTime) {
+                    log(`Skipping ad without valid time: "${ad.time}"`);
+                    continue;
+                }
+                
+                log(`Processing ad: username=${ad.username}, time="${ad.time}", parsedTime=${adTime}`);
+                
+                // Check if any tracked item is on the request side
+                const trackedItemIds = ['10159600649', '1678356850', '1402433072', '583721561', '9910420'];
+                const matchedItemId = trackedItemIds.find(itemId => 
+                    ad.requestItems.some(img => String(img.id) === String(itemId))
+                );
+                
+                if (!matchedItemId) {
+                    log(`Ad skipped - no tracked items found in request items: ${ad.requestItems.map(i => i.id).join(', ')}`);
+                    continue;
+                }
+                
+                // Find the corresponding tracked item row
+                const row = tracked.find(r => String(r.item_id) === String(matchedItemId));
+                if (!row) {
+                    log(`No tracking row found for item ${matchedItemId}`);
+                    continue;
+                }
+                
                 const { guild_id, channel_id, user_id, item_id, last_ad_id, tracking_started_at } = row;
-                let ads;
+                
+                // ULTRA-STRICT TIME FILTERING - Only accept ads under 30 seconds old
+                const currentTime = new Date();
+                const thirtySecondsAgo = new Date(currentTime.getTime() - 30 * 1000);
+                if (adTime < thirtySecondsAgo) {
+                    log(`Skipping ad older than 30 seconds: ${ad.time}`);
+                    continue;
+                }
+                
+                // Additional ultra-strict filtering based on raw time text
+                if (ad.time) {
+                    const timeText = ad.time.toLowerCase();
+                    
+                    // Skip any ads with "hour", "hours", "day", "days", "minute", "minutes" in the timestamp
+                    if (timeText.includes('hour') || timeText.includes('hours') || 
+                        timeText.includes('day') || timeText.includes('days') ||
+                        timeText.includes('minute') || timeText.includes('minutes')) {
+                        log(`Skipping ad with old timestamp: ${ad.time}`);
+                        continue;
+                    }
+                    // Only accept ads with seconds <= 30
+                    if (timeText.includes('second')) {
+                        const secondMatch = timeText.match(/(\d+)\s*second/);
+                        if (secondMatch && parseInt(secondMatch[1]) > 30) {
+                            log(`Skipping ad with old second timestamp: ${ad.time} (${secondMatch[1]} seconds > 30)`);
+                            continue;
+                        }
+                    }
+                }
+                
+                // Only post ads newer than tracking_started_at
+                if (tracking_started_at && adTime) {
+                    const startTime = new Date(tracking_started_at);
+                    if (adTime < startTime) {
+                        log(`Skipping ad older than tracking start: ${ad.time}`);
+                        continue;
+                    }
+                }
+                
+                // Check for user duplicate ads (same user + item within 1 hour)
+                const userDuplicateKey = `${ad.username}-${item_id}`;
+                const now = new Date();
+                const lastUserAdTime = userDuplicateCache.get(userDuplicateKey);
+                if (lastUserAdTime && (now.getTime() - lastUserAdTime.getTime()) < 3600000) { // 1 hour
+                    log(`Skipping duplicate ad from user ${ad.username} for item ${item_id} within 1 hour`);
+                    continue;
+                }
+                
+                // Check for content hash duplicates (same content within 1 hour)
+                const contentHashKey = `${ad.username}-${item_id}-${ad.adId}`;
+                const lastContentHashTime = adContentCache.get(contentHashKey);
+                if (lastContentHashTime && (now.getTime() - lastContentHashTime.getTime()) < 3600000) { // 1 hour
+                    log(`Skipping duplicate content hash from user ${ad.username} for item ${item_id} within 1 hour`);
+                    continue;
+                }
+                
+                // Prevent duplicate posts (in-memory and DB)
+                if (ad.adId === last_ad_id || postedAdIds.has(ad.adId)) {
+                    log(`Skipping duplicate ad ID: ${ad.adId}`);
+                    continue;
+                }
+                
+                log(`Posting new ad for item ${item_id} from user ${ad.username}`);
+                
+                // Update all caches
+                userDuplicateCache.set(userDuplicateKey, now);
+                adContentCache.set(contentHashKey, now);
+                postedAdIds.add(ad.adId);
+                
+                const channel = await client.channels.fetch(channel_id).catch(() => null);
+                if (!channel) continue;
+
+                // Take screenshot of the ad
+                let attachment = null;
                 try {
-                    ads = await fetchAllRequestAds(item_id);
-                } catch (err) {
-                    log(`Failed to fetch ads for item ${item_id}: ${err.message}`, 'ERROR');
-                    continue;
+                    attachment = await getTradeAdScreenshot({ username: ad.username, time: ad.time }, item_id);
+                } catch (screenshotErr) {
+                    log(`Failed to take screenshot: ${screenshotErr.message}`, 'WARN');
                 }
-                if (!ads || ads.length === 0) {
-                    log(`No ads found for item ${item_id}`);
-                    continue;
-                }
-                let foundMatch = false;
-                for (const ad of ads) {
-                    // First check if the ad is fresh enough before processing
-                    let adTime = parseAdTime(ad.time);
-                    if (!adTime) {
-                        log(`Skipping ad without valid time: "${ad.time}"`);
-                        continue;
-                    }
-                    
-                    log(`Processing ad: username=${ad.username}, time="${ad.time}", parsedTime=${adTime}`);
-                    
-                    // Check if the tracked item is on the request side (string-to-string)
-                    const match = ad.requestItems.some(img => String(img.id) === String(item_id));
-                    if (!match) {
-                        log(`Ad skipped - tracked item ${item_id} not found in request items: ${ad.requestItems.map(i => i.id).join(', ')}`);
-                        continue;
-                    }
-                    
-                    // ULTRA-STRICT TIME FILTERING - Only accept ads under 30 seconds old
-                    const currentTime = new Date();
-                    const thirtySecondsAgo = new Date(currentTime.getTime() - 30 * 1000);
-                    if (adTime < thirtySecondsAgo) {
-                        log(`Skipping ad older than 30 seconds: ${ad.time}`);
-                        continue;
-                    }
-                    
-                    // Additional ultra-strict filtering based on raw time text
-                    if (ad.time) {
-                        const timeText = ad.time.toLowerCase();
-                        
-                        // Skip any ads with "hour", "hours", "day", "days", "minute", "minutes" in the timestamp
-                        if (timeText.includes('hour') || timeText.includes('hours') || 
-                            timeText.includes('day') || timeText.includes('days') ||
-                            timeText.includes('minute') || timeText.includes('minutes')) {
-                            log(`Skipping ad with old timestamp: ${ad.time}`);
-                            continue;
-                        }
-                        // Only accept ads with seconds <= 30
-                        if (timeText.includes('second')) {
-                            const secondMatch = timeText.match(/(\d+)\s*second/);
-                            if (secondMatch && parseInt(secondMatch[1]) > 30) {
-                                log(`Skipping ad with old second timestamp: ${ad.time} (${secondMatch[1]} seconds > 30)`);
-                                continue;
-                            }
-                        }
-                    }
-                    
-                    // Only post ads newer than tracking_started_at
-                    if (tracking_started_at && adTime) {
-                        const startTime = new Date(tracking_started_at);
-                        if (adTime < startTime) {
-                            log(`Skipping ad older than tracking start: ${ad.time}`);
-                            continue;
-                        }
-                    }
-                    
-                    // Check for user duplicate ads (same user + item within 1 hour)
-                    const userDuplicateKey = `${ad.username}-${item_id}`;
-                    const now = new Date();
-                    const lastUserAdTime = userDuplicateCache.get(userDuplicateKey);
-                    if (lastUserAdTime && (now.getTime() - lastUserAdTime.getTime()) < 3600000) { // 1 hour
-                        log(`Skipping duplicate ad from user ${ad.username} for item ${item_id} within 1 hour`);
-                        continue;
-                    }
-                    
-                    // Check for content hash duplicates (same content within 1 hour)
-                    const contentHashKey = `${ad.username}-${item_id}-${ad.adId}`;
-                    const lastContentHashTime = adContentCache.get(contentHashKey);
-                    if (lastContentHashTime && (now.getTime() - lastContentHashTime.getTime()) < 3600000) { // 1 hour
-                        log(`Skipping duplicate content hash from user ${ad.username} for item ${item_id} within 1 hour`);
-                        continue;
-                    }
-                    
-                    foundMatch = true;
-                    // Prevent duplicate posts (in-memory and DB)
-                    if (ad.adId === last_ad_id || postedAdIds.has(ad.adId)) {
-                        log(`Skipping duplicate ad ID: ${ad.adId}`);
-                        continue;
-                    }
-                    
-                    log(`Posting new ad for item ${item_id} from user ${ad.username}`);
-                    
-                    // Update all caches
-                    userDuplicateCache.set(userDuplicateKey, now);
-                    adContentCache.set(contentHashKey, now);
-                    postedAdIds.add(ad.adId);
-                    
-                    const channel = await client.channels.fetch(channel_id).catch(() => null);
-                    if (!channel) continue;
 
-                    // Take screenshot of the ad
-                    let attachment = null;
+                // Determine embed color based on value difference
+                let embedColor = 0x2ecc40; // green by default
+                if (ad.valueDiff !== null) {
+                    embedColor = ad.valueDiff >= 0 ? 0x2ecc40 : 0xe74c3c;
+                }
+
+                // Build embed with improved formatting
+                const embed = new EmbedBuilder()
+                    .setTitle(`Send ${ad.username} a Trade`)
+                    .setURL(ad.sendTradeUrl || ad.profileUrl)
+                    .setColor(embedColor)
+                    .addFields(
+                        { name: 'Item', value: ad.trackedItemName || 'Unknown', inline: true },
+                        { name: 'Rolimon\'s Profile', value: `[View Profile](${ad.profileUrl})`, inline: true },
+                        { name: 'Roblox Trade Link', value: ad.sendTradeUrl ? `[Send Trade](${ad.sendTradeUrl})` : 'N/A', inline: true },
+                        { name: 'Trade Ads Created', value: ad.adsCreated || 'N/A', inline: true },
+                        { name: 'User Total Value', value: ad.userTotalValue !== null ? ad.userTotalValue.toLocaleString() : 'N/A', inline: true },
+                        { name: 'Value Difference', value: ad.valueDiff !== null ? (ad.valueDiff >= 0 ? '+' : '') + ad.valueDiff.toLocaleString() : 'N/A', inline: true },
+                        { name: 'RAP Difference', value: ad.rapDiff !== null ? (ad.rapDiff >= 0 ? '+' : '') + ad.rapDiff.toLocaleString() : 'N/A', inline: true },
+                        { name: 'Offered', value: ad.offerItems.map(i => i.name).join(', ') || 'None', inline: false },
+                        { name: 'Requested', value: ad.requestItems.map(i => i.name).join(', ') || 'None', inline: false }
+                    )
+                    .setFooter({ text: '@https://discord.gg/M4wjRvywHH' })
+                    .setTimestamp();
+                if (ad.userImg && ad.userImg.startsWith('http')) {
+                    embed.setThumbnail(ad.userImg);
+                }
+
+                // Send to channel
+                const channelMessage = {
+                    content: `<@${user_id}> New trade request ad for item ID ${item_id}.`,
+                    embeds: [embed]
+                };
+                
+                if (attachment) {
+                    channelMessage.files = [attachment];
+                }
+                
+                await channel.send(channelMessage);
+
+                // Check if user has DM forwarding enabled and send DM
+                if (row.forward_to_dms) {
                     try {
-                        attachment = await getTradeAdScreenshot({ username: ad.username, time: ad.time }, item_id);
-                    } catch (screenshotErr) {
-                        log(`Failed to take screenshot: ${screenshotErr.message}`, 'WARN');
-                    }
+                        const user = await client.users.fetch(user_id);
+                        if (user) {
+                            const dmEmbed = new EmbedBuilder()
+                                .setTitle(`DM: New Trade Ad for ${ad.trackedItemName}`)
+                                .setDescription(`A new trade ad was found for your tracked item in <#${channel_id}>`)
+                                .setColor(embedColor)
+                                .addFields(
+                                    { name: 'Item', value: ad.trackedItemName || 'Unknown', inline: true },
+                                    { name: 'User', value: ad.username, inline: true },
+                                    { name: 'Value Difference', value: ad.valueDiff !== null ? (ad.valueDiff >= 0 ? '+' : '') + ad.valueDiff.toLocaleString() : 'N/A', inline: true },
+                                    { name: 'RAP Difference', value: ad.rapDiff !== null ? (ad.rapDiff >= 0 ? '+' : '') + ad.rapDiff.toLocaleString() : 'N/A', inline: true },
+                                    { name: 'Channel', value: `<#${channel_id}>`, inline: false }
+                                )
+                                .setFooter({ text: 'DM Forwarding - @https://discord.gg/M4wjRvywHH' })
+                                .setTimestamp();
 
-                    // Determine embed color based on value difference
-                    let embedColor = 0x2ecc40; // green by default
-                    if (ad.valueDiff !== null) {
-                        embedColor = ad.valueDiff >= 0 ? 0x2ecc40 : 0xe74c3c;
-                    }
-
-                    // Build embed with improved formatting
-                    const embed = new EmbedBuilder()
-                        .setTitle(`Send ${ad.username} a Trade`)
-                        .setURL(ad.sendTradeUrl || ad.profileUrl)
-                        .setColor(embedColor)
-                        .addFields(
-                            { name: 'Item', value: ad.trackedItemName || 'Unknown', inline: true },
-                            { name: 'Rolimon\'s Profile', value: `[View Profile](${ad.profileUrl})`, inline: true },
-                            { name: 'Roblox Trade Link', value: ad.sendTradeUrl ? `[Send Trade](${ad.sendTradeUrl})` : 'N/A', inline: true },
-                            { name: 'Trade Ads Created', value: ad.adsCreated || 'N/A', inline: true },
-                            { name: 'User Total Value', value: ad.userTotalValue !== null ? ad.userTotalValue.toLocaleString() : 'N/A', inline: true },
-                            { name: 'Value Difference', value: ad.valueDiff !== null ? (ad.valueDiff >= 0 ? '+' : '') + ad.valueDiff.toLocaleString() : 'N/A', inline: true },
-                            { name: 'RAP Difference', value: ad.rapDiff !== null ? (ad.rapDiff >= 0 ? '+' : '') + ad.rapDiff.toLocaleString() : 'N/A', inline: true },
-                            { name: 'Offered', value: ad.offerItems.map(i => i.name).join(', ') || 'None', inline: false },
-                            { name: 'Requested', value: ad.requestItems.map(i => i.name).join(', ') || 'None', inline: false }
-                        )
-                        .setFooter({ text: '@https://discord.gg/M4wjRvywHH' })
-                        .setTimestamp();
-                    if (ad.userImg && ad.userImg.startsWith('http')) {
-                        embed.setThumbnail(ad.userImg);
-                    }
-
-                    // Send to channel
-                    const channelMessage = {
-                        content: `<@${user_id}> New trade request ad for item ID ${item_id}.`,
-                        embeds: [embed]
-                    };
-                    
-                    if (attachment) {
-                        channelMessage.files = [attachment];
-                    }
-                    
-                    await channel.send(channelMessage);
-
-                    // Check if user has DM forwarding enabled and send DM
-                    if (row.forward_to_dms) {
-                        try {
-                            const user = await client.users.fetch(user_id);
-                            if (user) {
-                                const dmEmbed = new EmbedBuilder()
-                                    .setTitle(`DM: New Trade Ad for ${ad.trackedItemName}`)
-                                    .setDescription(`A new trade ad was found for your tracked item in <#${channel_id}>`)
-                                    .setColor(embedColor)
-                                    .addFields(
-                                        { name: 'Item', value: ad.trackedItemName || 'Unknown', inline: true },
-                                        { name: 'User', value: ad.username, inline: true },
-                                        { name: 'Value Difference', value: ad.valueDiff !== null ? (ad.valueDiff >= 0 ? '+' : '') + ad.valueDiff.toLocaleString() : 'N/A', inline: true },
-                                        { name: 'RAP Difference', value: ad.rapDiff !== null ? (ad.rapDiff >= 0 ? '+' : '') + ad.rapDiff.toLocaleString() : 'N/A', inline: true },
-                                        { name: 'Channel', value: `<#${channel_id}>`, inline: false }
-                                    )
-                                    .setFooter({ text: 'DM Forwarding - @https://discord.gg/M4wjRvywHH' })
-                                    .setTimestamp();
-
-                                const dmMessage = {
-                                    content: `DM Forwarding: New trade ad for your tracked item ID **${item_id}**`,
-                                    embeds: [dmEmbed]
-                                };
-                                
-                                if (attachment) {
-                                    dmMessage.files = [attachment];
-                                }
-                                
-                                await user.send(dmMessage);
-                                log(`DM sent to user ${user_id} for item ${item_id}`);
+                            const dmMessage = {
+                                content: `DM Forwarding: New trade ad for your tracked item ID **${item_id}**`,
+                                embeds: [dmEmbed]
+                            };
+                            
+                            if (attachment) {
+                                dmMessage.files = [attachment];
                             }
-                        } catch (dmError) {
-                            log(`Could not send DM to user ${user_id}: ${dmError.message}`, 'ERROR');
-                            // Don't fail the whole process if DM fails
+                            
+                            await user.send(dmMessage);
+                            log(`DM sent to user ${user_id} for item ${item_id}`);
                         }
+                    } catch (dmError) {
+                        log(`Could not send DM to user ${user_id}: ${dmError.message}`, 'ERROR');
+                        // Don't fail the whole process if DM fails
                     }
-                    
-                    await db.query(
-                        'UPDATE tracked_items SET last_ad_id = $1 WHERE guild_id = $2 AND channel_id = $3 AND user_id = $4 AND item_id = $5',
-                        [ad.adId, guild_id, channel_id, user_id, item_id]
-                    );
-                    break;
                 }
-                if (!foundMatch) {
-                    log(`No ads with item ${item_id} on request side found in this cycle.`);
-                }
+                
+                await db.query(
+                    'UPDATE tracked_items SET last_ad_id = $1 WHERE guild_id = $2 AND channel_id = $3 AND user_id = $4 AND item_id = $5',
+                    [ad.adId, guild_id, channel_id, user_id, item_id]
+                );
             }
         } catch (err) {
             log(`Error in ad monitor: ${err.message}`, 'ERROR');
