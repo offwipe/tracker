@@ -245,8 +245,8 @@ async function fetchAllRequestAds() {
 }
 
 async function getTradeAdScreenshot(adData, itemId) {
-    const { username, time } = adData;
-    const url = `https://www.rolimons.com/itemtrades/${itemId}`;
+    const { username, time, adElemIndex } = adData;
+    const url = `https://www.rolimons.com/trades`;
     
     let browser;
     try {
@@ -275,16 +275,97 @@ async function getTradeAdScreenshot(adData, itemId) {
         // Wait for ads to load
         await page.waitForSelector('.mix_item', { timeout: 10000 });
         
-        // Find the specific ad by username and time
-        const adSelector = `.mix_item:has(.ad_creator_name:contains("${username}"))`;
+        // Find the specific ad by index (most reliable method)
+        const adSelector = `.mix_item:nth-child(${adElemIndex + 1})`;
         const adElement = await page.$(adSelector);
         
         if (adElement) {
-            const screenshot = await adElement.screenshot({
-                type: 'png',
-                encoding: 'binary'
-            });
-            return new AttachmentBuilder(screenshot, { name: 'trade_ad.png' });
+            // Get the bounding box of the ad element
+            const boundingBox = await adElement.boundingBox();
+            
+            if (boundingBox) {
+                // Take a screenshot of the entire page first
+                const fullScreenshot = await page.screenshot({
+                    type: 'png',
+                    encoding: 'binary'
+                });
+                
+                // Create a new page to crop the screenshot
+                const cropPage = await browser.newPage();
+                await cropPage.setViewport({ width: 1920, height: 1080 });
+                
+                // Set the screenshot as the page content
+                await cropPage.setContent(`
+                    <html>
+                        <body style="margin: 0; padding: 0;">
+                            <img src="data:image/png;base64,${fullScreenshot.toString('base64')}" 
+                                 style="position: absolute; top: 0; left: 0; width: 1920px; height: auto;">
+                        </body>
+                    </html>
+                `);
+                
+                // Crop to the specific ad area with some padding
+                const padding = 10;
+                const cropArea = {
+                    x: Math.max(0, boundingBox.x - padding),
+                    y: Math.max(0, boundingBox.y - padding),
+                    width: Math.min(1920 - boundingBox.x + padding, boundingBox.width + (padding * 2)),
+                    height: boundingBox.height + (padding * 2)
+                };
+                
+                const croppedScreenshot = await cropPage.screenshot({
+                    clip: cropArea,
+                    type: 'png',
+                    encoding: 'binary'
+                });
+                
+                await cropPage.close();
+                return new AttachmentBuilder(croppedScreenshot, { name: 'trade_ad.png' });
+            }
+        }
+        
+        // Fallback: try to find by username if index method fails
+        const usernameSelector = `.mix_item:has(.ad_creator_name:contains("${username}"))`;
+        const usernameElement = await page.$(usernameSelector);
+        
+        if (usernameElement) {
+            const boundingBox = await usernameElement.boundingBox();
+            
+            if (boundingBox) {
+                const fullScreenshot = await page.screenshot({
+                    type: 'png',
+                    encoding: 'binary'
+                });
+                
+                const cropPage = await browser.newPage();
+                await cropPage.setViewport({ width: 1920, height: 1080 });
+                
+                await cropPage.setContent(`
+                    <html>
+                        <body style="margin: 0; padding: 0;">
+                            <img src="data:image/png;base64,${fullScreenshot.toString('base64')}" 
+                                 style="position: absolute; top: 0; left: 0; width: 1920px; height: auto;">
+                        </body>
+                    </html>
+                `);
+                
+                const padding = 10;
+                const cropArea = {
+                    x: Math.max(0, boundingBox.x - padding),
+                    y: Math.max(0, boundingBox.y - padding),
+                    width: Math.min(1920 - boundingBox.x + padding, boundingBox.width + (padding * 2)),
+                    height: boundingBox.height + (padding * 2)
+                };
+                
+                const croppedScreenshot = await cropPage.screenshot({
+                    clip: cropArea,
+                    type: 'png',
+                    encoding: 'binary'
+                });
+                
+                await cropPage.close();
+                return new AttachmentBuilder(croppedScreenshot, { name: 'trade_ad.png' });
+            }
         }
         
         return null;
@@ -464,10 +545,24 @@ async function monitorAds(client) {
                 const channel = await client.channels.fetch(channel_id).catch(() => null);
                 if (!channel) continue;
 
-                // Take screenshot of the ad
+                // Take screenshot of the ad (only for very fresh ads to avoid slowing down the cycle)
                 let attachment = null;
                 try {
-                    attachment = await getTradeAdScreenshot({ username: ad.username, time: ad.time }, item_id);
+                    // Only take screenshots for ads under 10 seconds old to avoid slowing down the cycle
+                    const adTime = parseAdTime(ad.time);
+                    const currentTime = new Date();
+                    const tenSecondsAgo = new Date(currentTime.getTime() - 10 * 1000);
+                    
+                    if (adTime && adTime > tenSecondsAgo) {
+                        log(`Taking screenshot for fresh ad (${ad.time})`);
+                        attachment = await getTradeAdScreenshot({ 
+                            username: ad.username, 
+                            time: ad.time, 
+                            adElemIndex: ad.adElemIndex 
+                        }, item_id);
+                    } else {
+                        log(`Skipping screenshot for older ad (${ad.time}) to maintain cycle speed`);
+                    }
                 } catch (screenshotErr) {
                     log(`Failed to take screenshot: ${screenshotErr.message}`, 'WARN');
                 }
