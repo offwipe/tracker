@@ -324,10 +324,9 @@ function parseAdTime(adTimeStr) {
     // First, do ultra-strict text-based filtering
     const timeText = adTimeStr.toLowerCase();
     
-    // Reject any ads with "hour", "hours", "day", "days", "minute", "minutes" in the timestamp
+    // Reject any ads with "hour", "hours", "day", "days" in the timestamp (allow minutes now)
     if (timeText.includes('hour') || timeText.includes('hours') || 
-        timeText.includes('day') || timeText.includes('days') ||
-        timeText.includes('minute') || timeText.includes('minutes')) {
+        timeText.includes('day') || timeText.includes('days')) {
         return null;
     }
     
@@ -335,10 +334,10 @@ function parseAdTime(adTimeStr) {
         const now = new Date();
         const secMatch = adTimeStr.match(/(\d+)\s*second/);
         
-        // Only accept seconds under 30 (ultra-fresh)
+        // Accept seconds under 60 (1 minute)
         if (secMatch) {
             const seconds = parseInt(secMatch[1]);
-            if (seconds > 30) {
+            if (seconds > 60) {
                 return null;
             }
             return new Date(now.getTime() - seconds * 1000);
@@ -354,10 +353,10 @@ function parseAdTime(adTimeStr) {
         return null;
     }
     
-    // Reject dates that are too old (more than 30 seconds)
+    // Reject dates that are too old (more than 60 seconds)
     const now = new Date();
-    const thirtySecondsAgo = new Date(now.getTime() - 30 * 1000);
-    if (parsed < thirtySecondsAgo) {
+    const sixtySecondsAgo = new Date(now.getTime() - 60 * 1000);
+    if (parsed < sixtySecondsAgo) {
         return null;
     }
     
@@ -411,11 +410,11 @@ async function monitorAds(client) {
                 
                 const { guild_id, channel_id, user_id, item_id, last_ad_id, tracking_started_at } = row;
                 
-                // ULTRA-STRICT TIME FILTERING - Only accept ads under 30 seconds old
+                // TIME FILTERING - Only accept ads under 60 seconds old (1 minute)
                 const currentTime = new Date();
-                const thirtySecondsAgo = new Date(currentTime.getTime() - 30 * 1000);
-                if (adTime < thirtySecondsAgo) {
-                    log(`Skipping ad older than 30 seconds: ${ad.time}`);
+                const sixtySecondsAgo = new Date(currentTime.getTime() - 60 * 1000);
+                if (adTime < sixtySecondsAgo) {
+                    log(`Skipping ad older than 60 seconds: ${ad.time}`);
                     continue;
                 }
                 
@@ -423,18 +422,17 @@ async function monitorAds(client) {
                 if (ad.time) {
                     const timeText = ad.time.toLowerCase();
                     
-                    // Skip any ads with "hour", "hours", "day", "days", "minute", "minutes" in the timestamp
+                    // Skip any ads with "hour", "hours", "day", "days" in the timestamp (allow minutes now)
                     if (timeText.includes('hour') || timeText.includes('hours') || 
-                        timeText.includes('day') || timeText.includes('days') ||
-                        timeText.includes('minute') || timeText.includes('minutes')) {
+                        timeText.includes('day') || timeText.includes('days')) {
                         log(`Skipping ad with old timestamp: ${ad.time}`);
                         continue;
                     }
-                    // Only accept ads with seconds <= 30
+                    // Only accept ads with seconds <= 60
                     if (timeText.includes('second')) {
                         const secondMatch = timeText.match(/(\d+)\s*second/);
-                        if (secondMatch && parseInt(secondMatch[1]) > 30) {
-                            log(`Skipping ad with old second timestamp: ${ad.time} (${secondMatch[1]} seconds > 30)`);
+                        if (secondMatch && parseInt(secondMatch[1]) > 60) {
+                            log(`Skipping ad with old second timestamp: ${ad.time} (${secondMatch[1]} seconds > 60)`);
                             continue;
                         }
                     }
@@ -482,21 +480,27 @@ async function monitorAds(client) {
                 const channel = await client.channels.fetch(channel_id).catch(() => null);
                 if (!channel) continue;
 
-                // Take screenshot of the ad (only for very fresh ads to avoid slowing down the cycle)
+                // Take screenshot of the ad (increased time window to catch more ads)
                 let attachment = null;
                 try {
-                    // Only take screenshots for ads under 10 seconds old to avoid slowing down the cycle
+                    // Take screenshots for ads under 50 seconds old (increased to match 1-minute limit)
                     const adTime = parseAdTime(ad.time);
                     const currentTime = new Date();
-                    const tenSecondsAgo = new Date(currentTime.getTime() - 10 * 1000);
+                    const fiftySecondsAgo = new Date(currentTime.getTime() - 50 * 1000);
                     
-                    if (adTime && adTime > tenSecondsAgo) {
+                    if (adTime && adTime > fiftySecondsAgo) {
                         log(`Taking screenshot for fresh ad (${ad.time})`);
                         attachment = await getTradeAdScreenshot({ 
                             username: ad.username, 
                             time: ad.time, 
                             adElemIndex: ad.adElemIndex 
                         }, item_id);
+                        
+                        if (attachment) {
+                            log(`Successfully captured screenshot for ${ad.username}`);
+                        } else {
+                            log(`Screenshot failed for ${ad.username} - will try username fallback`);
+                        }
                     } else {
                         log(`Skipping screenshot for older ad (${ad.time}) to maintain cycle speed`);
                     }
