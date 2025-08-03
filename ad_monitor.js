@@ -21,10 +21,253 @@ const userDuplicateCache = new Map(); // key: `${username}-${itemId}`, value: ti
 // Track ad content hashes to prevent duplicate content
 const adContentCache = new Map(); // key: `${username}-${itemId}-${adContentHash}`, value: timestamp
 
-// Clean logging function
+// Screenshot system improvements
+let sharedBrowser = null;
+const freshAdsForScreenshot = new Map(); // adId -> {ad, timestamp, attempts}
+const screenshotMetrics = {
+    attempts: 0,
+    successes: 0,
+    failures: 0,
+    avgTime: 0,
+    lastSuccess: null,
+    lastError: null
+};
+
+// Enhanced logging with colors
 function log(message, level = 'INFO') {
     const timestamp = new Date().toISOString().split('T')[1].split('.')[0];
-    console.log(`[${timestamp}][${level}] ${message}`);
+    const colors = {
+        'ERROR': '\x1b[31m', // Red
+        'WARN': '\x1b[33m',  // Yellow
+        'SUCCESS': '\x1b[32m', // Green
+        'INFO': '\x1b[36m',  // Cyan
+        'DEBUG': '\x1b[35m'  // Magenta
+    };
+    const reset = '\x1b[0m';
+    const color = colors[level] || colors['INFO'];
+    console.log(`${color}[${timestamp}][${level}]${reset} ${message}`);
+}
+
+// Get or create shared browser instance
+async function getSharedBrowser() {
+    if (!sharedBrowser) {
+        try {
+            sharedBrowser = await puppeteer.launch({
+                headless: true,
+                executablePath: '/usr/bin/chromium-browser',
+                args: [
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-accelerated-2d-canvas',
+                    '--no-first-run',
+                    '--no-zygote',
+                    '--disable-gpu',
+                    '--disable-web-security',
+                    '--disable-features=VizDisplayCompositor',
+                    '--memory-pressure-off',
+                    '--max_old_space_size=4096'
+                ]
+            });
+            log('Shared browser instance created successfully', 'SUCCESS');
+        } catch (err) {
+            log(`Failed to create shared browser: ${err.message}`, 'ERROR');
+            throw err;
+        }
+    }
+    return sharedBrowser;
+}
+
+// Clean up shared browser
+async function cleanupSharedBrowser() {
+    if (sharedBrowser) {
+        try {
+            await sharedBrowser.close();
+            sharedBrowser = null;
+            log('Shared browser cleaned up', 'INFO');
+        } catch (err) {
+            log(`Error cleaning up browser: ${err.message}`, 'WARN');
+        }
+    }
+}
+
+// Flexible time matching
+function isTimeClose(time1, time2) {
+    if (!time1 || !time2) return false;
+    
+    // Normalize times
+    const normalizeTime = (time) => {
+        return time.toLowerCase().trim().replace(/\s+/g, ' ');
+    };
+    
+    const t1 = normalizeTime(time1);
+    const t2 = normalizeTime(time2);
+    
+    // Exact match
+    if (t1 === t2) return true;
+    
+    // Extract numbers and units
+    const extractTime = (timeStr) => {
+        const match = timeStr.match(/(\d+)\s*(second|minute|hour)s?\s*ago/i);
+        if (match) {
+            return { value: parseInt(match[1]), unit: match[2].toLowerCase() };
+        }
+        return null;
+    };
+    
+    const time1Data = extractTime(t1);
+    const time2Data = extractTime(t2);
+    
+    if (!time1Data || !time2Data) return false;
+    
+    // Allow 5-second tolerance for same unit
+    if (time1Data.unit === time2Data.unit) {
+        return Math.abs(time1Data.value - time2Data.value) <= 5;
+    }
+    
+    // Allow cross-unit matching (e.g., "59 seconds ago" matches "1 minute ago")
+    if (time1Data.unit === 'second' && time2Data.unit === 'minute' && time2Data.value === 1) {
+        return time1Data.value >= 55 && time1Data.value <= 65;
+    }
+    if (time2Data.unit === 'second' && time1Data.unit === 'minute' && time1Data.value === 1) {
+        return time2Data.value >= 55 && time2Data.value <= 65;
+    }
+    
+    return false;
+}
+
+// Enhanced element finding with fallbacks
+function findAdElement(page, targetUsername, targetTime) {
+    return page.evaluateHandle((username, time) => {
+        const ads = document.querySelectorAll('.mix_item');
+        
+        for (let i = 0; i < ads.length; i++) {
+            const ad = ads[i];
+            
+            // Find username element
+            const usernameElement = ad.querySelector('.ad_creator_name');
+            if (!usernameElement) continue;
+            
+            const username = usernameElement.textContent.trim();
+            if (username.toLowerCase() !== username.toLowerCase()) continue;
+            
+            // Find time element with multiple fallbacks
+            let timeElement = null;
+            const timeSelectors = [
+                '.trade-ad-timestamp',
+                '[class*="timestamp"]',
+                '[class*="time"]',
+                '[title*="ago"]',
+                '[data-time]'
+            ];
+            
+            for (const selector of timeSelectors) {
+                timeElement = ad.querySelector(selector);
+                if (timeElement && timeElement.textContent.trim()) break;
+            }
+            
+            // Fallback: search all text content for time
+            if (!timeElement) {
+                const allText = ad.textContent;
+                const timeMatch = allText.match(/(\d+\s*(?:second|minute|hour)s?\s*ago)/i);
+                if (timeMatch) {
+                    timeElement = { textContent: timeMatch[1] };
+                }
+            }
+            
+            if (timeElement) {
+                const adTime = timeElement.textContent.trim();
+                
+                // Flexible time matching
+                if (isTimeClose(adTime, time)) {
+                    return ad;
+                }
+            }
+        }
+        
+        return null;
+    }, targetUsername, targetTime);
+}
+
+// Enhanced screenshot function with retries and fallbacks
+async function getTradeAdScreenshotWithRetry(adData, itemId, maxRetries = 3) {
+    const { username, time, adElemIndex } = adData;
+    const startTime = Date.now();
+    
+    screenshotMetrics.attempts++;
+    
+    try {
+        const browser = await getSharedBrowser();
+        const page = await browser.newPage();
+        
+        // Enhanced page setup
+        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
+        await page.setViewport({ width: 1920, height: 1080 });
+        
+        // Set longer timeout for better reliability
+        await page.setDefaultTimeout(45000);
+        await page.setDefaultNavigationTimeout(45000);
+        
+        const url = `https://www.rolimons.com/trades`;
+        await page.goto(url, { waitUntil: 'networkidle2', timeout: 45000 });
+        
+        // Handle cookie consent with longer timeout
+        try {
+            await page.waitForSelector('#onetrust-accept-btn-handler', { timeout: 10000 });
+            await page.click('#onetrust-accept-btn-handler');
+            log('Clicked cookie consent button', 'INFO');
+        } catch (cookieErr) {
+            // Cookie popup might not appear, that's fine
+        }
+        
+        // Wait for ads to load with longer timeout
+        await page.waitForSelector('.mix_item', { timeout: 15000 });
+        
+        // Find the ad element with enhanced logic
+        const adElement = await findAdElement(page, username, time);
+        
+        // Check if we found a valid element
+        const elementHandle = await adElement.asElement();
+        if (elementHandle) {
+            // Scroll element into view and wait for animations
+            await elementHandle.scrollIntoView();
+            await page.waitForTimeout(1000);
+            
+            // Enhanced screenshot with better quality
+            const screenshot = await elementHandle.screenshot({
+                type: 'png',
+                encoding: 'binary',
+                quality: 90
+            });
+            
+            const duration = Date.now() - startTime;
+            screenshotMetrics.successes++;
+            screenshotMetrics.avgTime = (screenshotMetrics.avgTime + duration) / 2;
+            screenshotMetrics.lastSuccess = new Date();
+            
+            log(`Successfully took screenshot for ${username} at ${time} (${duration}ms)`, 'SUCCESS');
+            return new AttachmentBuilder(screenshot, { name: 'trade_ad.png' });
+        }
+        
+        log(`Could not find ad element for screenshot - username: ${username}, time: ${time}`, 'WARN');
+        return null;
+        
+    } catch (err) {
+        const duration = Date.now() - startTime;
+        screenshotMetrics.failures++;
+        screenshotMetrics.lastError = err.message;
+        
+        log(`Screenshot attempt failed for ${username}: ${err.message} (${duration}ms)`, 'ERROR');
+        
+        // Retry logic
+        if (maxRetries > 1) {
+            log(`Retrying screenshot for ${username} (${maxRetries - 1} attempts left)`, 'WARN');
+            await new Promise(resolve => setTimeout(resolve, 2000)); // Wait 2 seconds
+            return await getTradeAdScreenshotWithRetry(adData, itemId, maxRetries - 1);
+        }
+        
+        return null;
+    }
 }
 
 // Create a hash of ad content for duplicate detection
@@ -32,6 +275,138 @@ function createAdHash(ad) {
     // Include more specific data to prevent false duplicates
     const content = `${ad.username}-${ad.time}-${ad.offerItems.map(i => i.name).join(',')}-${ad.requestItems.map(i => i.name).join(',')}-${ad.offerValue}-${ad.requestValue}`;
     return crypto.createHash('md5').update(content).digest('hex');
+}
+
+function parseAdTime(adTimeStr) {
+    // Try to parse "x minutes ago", "x seconds ago", or ISO string
+    if (!adTimeStr) return null;
+    adTimeStr = adTimeStr.trim();
+    
+    // First, do ultra-strict text-based filtering
+    const timeText = adTimeStr.toLowerCase();
+    
+    // Reject any ads with "hour", "hours", "day", "days" in the timestamp (allow minutes now)
+    if (timeText.includes('hour') || timeText.includes('hours') || 
+        timeText.includes('day') || timeText.includes('days')) {
+        return null;
+    }
+    
+    if (/ago$/.test(adTimeStr)) {
+        const now = new Date();
+        const secMatch = adTimeStr.match(/(\d+)\s*second/);
+        const minMatch = adTimeStr.match(/(\d+)\s*minute/);
+        
+        // Accept seconds under 60 (1 minute)
+        if (secMatch) {
+            const seconds = parseInt(secMatch[1]);
+            if (seconds > 60) {
+                return null;
+            }
+            return new Date(now.getTime() - seconds * 1000);
+        }
+        
+        // Accept exactly 1 minute (60-119 seconds show as "1 minute ago")
+        if (minMatch) {
+            const minutes = parseInt(minMatch[1]);
+            if (minutes === 1) {
+                // 1 minute ago = between 60-119 seconds, so use 90 seconds as average
+                return new Date(now.getTime() - 90 * 1000);
+            }
+            // Reject 2+ minutes
+            return null;
+        }
+        
+        // If it ends with "ago" but doesn't match our patterns, reject it
+        return null;
+    }
+    
+    // Try to parse as ISO or date string, but be ultra-strict
+    const parsed = new Date(adTimeStr);
+    if (isNaN(parsed)) {
+        return null;
+    }
+    
+    // Reject dates that are too old (more than 60 seconds)
+    const now = new Date();
+    const sixtySecondsAgo = new Date(now.getTime() - 60 * 1000);
+    if (parsed < sixtySecondsAgo) {
+        return null;
+    }
+    
+    return parsed;
+}
+
+// Enhanced ad processing with caching and parallel screenshots
+async function processAdsWithScreenshots(ads, trackedItems) {
+    const freshAds = [];
+    const screenshotPromises = [];
+    
+    // First pass: identify fresh ads and add to cache
+    for (const ad of ads) {
+        const adTime = parseAdTime(ad.time);
+        if (!adTime) {
+            log(`Skipping ad without valid time: "${ad.time}"`, 'WARN');
+            continue;
+        }
+        
+        const currentTime = new Date();
+        const ninetySecondsAgo = new Date(currentTime.getTime() - 90 * 1000); // Extended window
+        
+        if (adTime > ninetySecondsAgo) {
+            freshAdsForScreenshot.set(ad.adId, { 
+                ad, 
+                timestamp: Date.now(),
+                attempts: 0 
+            });
+            freshAds.push(ad);
+        }
+    }
+    
+    log(`Found ${freshAds.length} fresh ads for processing`, 'INFO');
+    
+    // Second pass: process ads and prepare screenshot promises
+    for (const ad of freshAds) {
+        // Check if any tracked item is on the request side
+        const trackedItemIds = ['10159600649', '1678356850', '1402433072', '583721561', '9910420'];
+        const matchedItemId = trackedItemIds.find(itemId => 
+            ad.requestItems.some(img => String(img.id) === String(itemId))
+        );
+        
+        if (!matchedItemId) {
+            log(`Ad skipped - no tracked items found in request items: ${ad.requestItems.map(i => i.id).join(', ')}`, 'WARN');
+            continue;
+        }
+        
+        // Find the corresponding tracked item row
+        const row = trackedItems.find(r => String(r.item_id) === String(matchedItemId));
+        if (!row) {
+            log(`No tracking row found for item ${matchedItemId}`, 'WARN');
+            continue;
+        }
+        
+        // Prepare screenshot promise for this ad
+        const screenshotPromise = getTradeAdScreenshotWithRetry(ad, matchedItemId)
+            .then(attachment => ({ ad, row, attachment, success: true }))
+            .catch(err => ({ ad, row, attachment: null, success: false, error: err.message }));
+        
+        screenshotPromises.push(screenshotPromise);
+    }
+    
+    // Wait for all screenshots with timeout
+    log(`Starting ${screenshotPromises.length} screenshot operations in parallel`, 'INFO');
+    const results = await Promise.allSettled(screenshotPromises);
+    
+    // Process results
+    const processedResults = [];
+    for (const result of results) {
+        if (result.status === 'fulfilled') {
+            processedResults.push(result.value);
+        } else {
+            log(`Screenshot promise rejected: ${result.reason}`, 'ERROR');
+        }
+    }
+    
+    return processedResults;
 }
 
 function parseAd(ad) {
@@ -144,7 +519,7 @@ function parseAd(ad) {
     const trackedItemIds = ['10159600649', '1678356850', '1402433072', '583721561', '9910420'];
     for (const trackedItemId of trackedItemIds) {
         trackedItem = requestItems.find(i => i.id === trackedItemId) || requestItems.find(i => i.onclick && i.onclick.includes(trackedItemId));
-        if (trackedItem) {
+    if (trackedItem) {
             // Request value/RAP (now only for tracked item)
             trackedItemValue = trackedItem && trackedItem.value ? parseInt(trackedItem.value.replace(/,/g, '')) : null;
             trackedItemRAP = trackedItem && trackedItem.rap ? parseInt(trackedItem.rap.replace(/,/g, '')) : null;
@@ -245,157 +620,19 @@ async function fetchAllRequestAds() {
     }
 }
 
-async function getTradeAdScreenshot(adData, itemId) {
-    const { username, time, adElemIndex } = adData;
-    const url = `https://www.rolimons.com/trades`;
-    
-    let browser;
-    try {
-        browser = await puppeteer.launch({
-            headless: true,
-            executablePath: '/usr/bin/chromium-browser',
-            args: [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-accelerated-2d-canvas',
-                '--no-first-run',
-                '--no-zygote',
-                '--disable-gpu',
-                '--disable-web-security',
-                '--disable-features=VizDisplayCompositor'
-            ]
-        });
-        
-        const page = await browser.newPage();
-        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
-        await page.setViewport({ width: 1920, height: 1080 });
-        
-        await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
-        
-        // Handle cookie consent popup if it appears
-        try {
-            await page.waitForSelector('#onetrust-accept-btn-handler', { timeout: 5000 });
-            await page.click('#onetrust-accept-btn-handler');
-            log('Clicked cookie consent button');
-        } catch (cookieErr) {
-            // Cookie popup might not appear, that's fine
-        }
-        
-        // Wait for ads to load
-        await page.waitForSelector('.mix_item', { timeout: 10000 });
-        
-        // Use JavaScript to find the exact ad by username and time
-        const adElement = await page.evaluateHandle((targetUsername, targetTime) => {
-            const ads = document.querySelectorAll('.mix_item');
-            for (let i = 0; i < ads.length; i++) {
-                const ad = ads[i];
-                const usernameElement = ad.querySelector('.ad_creator_name');
-                const timeElement = ad.querySelector('.trade-ad-timestamp') || 
-                                  ad.querySelector('[class*="timestamp"]') ||
-                                  ad.querySelector('[class*="time"]');
-                
-                if (usernameElement && timeElement) {
-                    const username = usernameElement.textContent.trim();
-                    const time = timeElement.textContent.trim();
-                    
-                    // Match by username and approximate time
-                    if (username === targetUsername && time === targetTime) {
-                        return ad;
-                    }
-                }
-            }
-            return null;
-        }, username, time);
-        
-        // Check if we found a valid element
-        const elementHandle = await adElement.asElement();
-        if (elementHandle) {
-            // If we found the ad, take a screenshot
-            const screenshot = await elementHandle.screenshot({
-                type: 'png',
-                encoding: 'binary'
-            });
-            
-            log(`Successfully took screenshot for ${username} at ${time}`);
-            return new AttachmentBuilder(screenshot, { name: 'trade_ad.png' });
-        }
-        
-        log(`Could not find ad element for screenshot - username: ${username}, time: ${time}`);
-        return null;
-    } catch (err) {
-        log(`Error taking screenshot for item ${itemId}: ${err.message}`, 'ERROR');
-        return null;
-    } finally {
-        if (browser) {
-            await browser.close();
-        }
-    }
-}
-
-function parseAdTime(adTimeStr) {
-    // Try to parse "x minutes ago", "x seconds ago", or ISO string
-    if (!adTimeStr) return null;
-    adTimeStr = adTimeStr.trim();
-    
-    // First, do ultra-strict text-based filtering
-    const timeText = adTimeStr.toLowerCase();
-    
-    // Reject any ads with "hour", "hours", "day", "days" in the timestamp (allow minutes now)
-    if (timeText.includes('hour') || timeText.includes('hours') || 
-        timeText.includes('day') || timeText.includes('days')) {
-        return null;
-    }
-    
-    if (/ago$/.test(adTimeStr)) {
-        const now = new Date();
-        const secMatch = adTimeStr.match(/(\d+)\s*second/);
-        const minMatch = adTimeStr.match(/(\d+)\s*minute/);
-        
-        // Accept seconds under 60 (1 minute)
-        if (secMatch) {
-            const seconds = parseInt(secMatch[1]);
-            if (seconds > 60) {
-                return null;
-            }
-            return new Date(now.getTime() - seconds * 1000);
-        }
-        
-        // Accept exactly 1 minute (60-119 seconds show as "1 minute ago")
-        if (minMatch) {
-            const minutes = parseInt(minMatch[1]);
-            if (minutes === 1) {
-                // 1 minute ago = between 60-119 seconds, so use 90 seconds as average
-                return new Date(now.getTime() - 90 * 1000);
-            }
-            // Reject 2+ minutes
-            return null;
-        }
-        
-        // If it ends with "ago" but doesn't match our patterns, reject it
-        return null;
-    }
-    
-    // Try to parse as ISO or date string, but be ultra-strict
-    const parsed = new Date(adTimeStr);
-    if (isNaN(parsed)) {
-        return null;
-    }
-    
-    // Reject dates that are too old (more than 60 seconds)
-    const now = new Date();
-    const sixtySecondsAgo = new Date(now.getTime() - 60 * 1000);
-    if (parsed < sixtySecondsAgo) {
-        return null;
-    }
-    
-    return parsed;
-}
-
 async function monitorAds(client) {
+    // Log startup with metrics
+    log('Enhanced ad monitor started with improved screenshot system', 'SUCCESS');
+    log(`Screenshot metrics: ${screenshotMetrics.attempts} attempts, ${screenshotMetrics.successes} successes, ${screenshotMetrics.failures} failures`, 'INFO');
+    
     setInterval(async () => {
         try {
             const { rows: tracked } = await db.query('SELECT * FROM tracked_items');
+            if (!tracked || tracked.length === 0) {
+                log('No tracked items found in database', 'WARN');
+                return;
+            }
+            
             let ads;
             try {
                 ads = await fetchAllRequestAds();
@@ -403,163 +640,93 @@ async function monitorAds(client) {
                 log(`Failed to fetch ads from trades page: ${err.message}`, 'ERROR');
                 return;
             }
+            
             if (!ads || ads.length === 0) {
-                log(`No ads found on trades page`);
+                log('No ads found on trades page', 'WARN');
                 return;
             }
             
-            // Process all ads and find matches for tracked items
-            for (const ad of ads) {
-                // First check if the ad is fresh enough before processing
-                let adTime = parseAdTime(ad.time);
-                if (!adTime) {
-                    log(`Skipping ad without valid time: "${ad.time}"`);
-                    continue;
-                }
+            log(`Processing ${ads.length} ads with enhanced screenshot system`, 'INFO');
+            
+            // Use enhanced processing with parallel screenshots
+            const processedResults = await processAdsWithScreenshots(ads, tracked);
+            
+            // Process results and send messages
+            for (const result of processedResults) {
+                const { ad, row, attachment, success, error } = result;
                 
-                log(`Processing ad: username=${ad.username}, time="${ad.time}", parsedTime=${adTime}`);
-                
-                // Check if any tracked item is on the request side
-                const trackedItemIds = ['10159600649', '1678356850', '1402433072', '583721561', '9910420'];
-                const matchedItemId = trackedItemIds.find(itemId => 
-                    ad.requestItems.some(img => String(img.id) === String(itemId))
-                );
-                
-                if (!matchedItemId) {
-                    log(`Ad skipped - no tracked items found in request items: ${ad.requestItems.map(i => i.id).join(', ')}`);
-                    continue;
-                }
-                
-                // Find the corresponding tracked item row
-                const row = tracked.find(r => String(r.item_id) === String(matchedItemId));
-                if (!row) {
-                    log(`No tracking row found for item ${matchedItemId}`);
-                    continue;
-                }
+                if (!row) continue;
                 
                 const { guild_id, channel_id, user_id, item_id, last_ad_id, tracking_started_at } = row;
                 
-                // TIME FILTERING - Only accept ads under 60 seconds old (1 minute)
+                // Enhanced duplicate prevention with extended time window
                 const currentTime = new Date();
-                const sixtySecondsAgo = new Date(currentTime.getTime() - 60 * 1000);
-                if (adTime < sixtySecondsAgo) {
-                    log(`Skipping ad older than 60 seconds: ${ad.time}`);
+                const ninetySecondsAgo = new Date(currentTime.getTime() - 90 * 1000);
+                const adTime = parseAdTime(ad.time);
+                
+                if (!adTime || adTime < ninetySecondsAgo) {
+                    log(`Skipping ad older than 90 seconds: ${ad.time}`, 'WARN');
                     continue;
                 }
                 
-                // Additional ultra-strict filtering based on raw time text
-                if (ad.time) {
-                    const timeText = ad.time.toLowerCase();
-                    
-                    // Skip any ads with "hour", "hours", "day", "days" in the timestamp
-                    if (timeText.includes('hour') || timeText.includes('hours') || 
-                        timeText.includes('day') || timeText.includes('days')) {
-                        log(`Skipping ad with old timestamp: ${ad.time}`);
-                        continue;
-                    }
-                    // Skip ads with 2+ minutes (but allow "1 minute ago")
-                    if (timeText.includes('minute')) {
-                        const minuteMatch = timeText.match(/(\d+)\s*minute/);
-                        if (minuteMatch && parseInt(minuteMatch[1]) > 1) {
-                            log(`Skipping ad with old minute timestamp: ${ad.time} (${minuteMatch[1]} minutes > 1)`);
-                            continue;
-                        }
-                    }
-                    // Only accept ads with seconds <= 60
-                    if (timeText.includes('second')) {
-                        const secondMatch = timeText.match(/(\d+)\s*second/);
-                        if (secondMatch && parseInt(secondMatch[1]) > 60) {
-                            log(`Skipping ad with old second timestamp: ${ad.time} (${secondMatch[1]} seconds > 60)`);
-                            continue;
-                        }
-                    }
+                // Enhanced duplicate checks
+                const userDuplicateKey = `${ad.username}-${item_id}`;
+                const lastUserAdTime = userDuplicateCache.get(userDuplicateKey);
+                if (lastUserAdTime && (currentTime.getTime() - lastUserAdTime.getTime()) < 3600000) {
+                    log(`Skipping duplicate ad from user ${ad.username} for item ${item_id} within 1 hour`, 'WARN');
+                    continue;
+                }
+                
+                const contentHashKey = `${ad.username}-${item_id}-${ad.adId}`;
+                const lastContentHashTime = adContentCache.get(contentHashKey);
+                if (lastContentHashTime && (currentTime.getTime() - lastContentHashTime.getTime()) < 3600000) {
+                    log(`Skipping duplicate content hash from user ${ad.username} for item ${item_id} within 1 hour`, 'WARN');
+                    continue;
+                }
+                
+                const exactDuplicateKey = `${ad.username}-${ad.time}-${item_id}`;
+                const lastExactDuplicate = adContentCache.get(exactDuplicateKey);
+                if (lastExactDuplicate) {
+                    log(`Skipping exact duplicate: ${ad.username} at ${ad.time} for item ${item_id}`, 'WARN');
+                    continue;
+                }
+                
+                // Prevent duplicate posts (in-memory and DB)
+                if (ad.adId === last_ad_id || postedAdIds.has(ad.adId)) {
+                    log(`Skipping duplicate ad ID: ${ad.adId}`, 'WARN');
+                    continue;
                 }
                 
                 // Only post ads newer than tracking_started_at
                 if (tracking_started_at && adTime) {
                     const startTime = new Date(tracking_started_at);
                     if (adTime < startTime) {
-                        log(`Skipping ad older than tracking start: ${ad.time}`);
+                        log(`Skipping ad older than tracking start: ${ad.time}`, 'WARN');
                         continue;
                     }
                 }
                 
-                // Check for user duplicate ads (same user + item within 1 hour)
-                const userDuplicateKey = `${ad.username}-${item_id}`;
-                const now = new Date();
-                const lastUserAdTime = userDuplicateCache.get(userDuplicateKey);
-                if (lastUserAdTime && (now.getTime() - lastUserAdTime.getTime()) < 3600000) { // 1 hour
-                    log(`Skipping duplicate ad from user ${ad.username} for item ${item_id} within 1 hour`);
-                    continue;
-                }
+                log(`Posting new ad for item ${item_id} from user ${ad.username} (screenshot: ${success ? 'SUCCESS' : 'FAILED'})`, 'SUCCESS');
                 
-                                 // Check for content hash duplicates (same content within 1 hour)
-                 const contentHashKey = `${ad.username}-${item_id}-${ad.adId}`;
-                 const lastContentHashTime = adContentCache.get(contentHashKey);
-                 if (lastContentHashTime && (now.getTime() - lastContentHashTime.getTime()) < 3600000) { // 1 hour
-                     log(`Skipping duplicate content hash from user ${ad.username} for item ${item_id} within 1 hour`);
-                     continue;
-                 }
-                 
-                 // Additional check: same username + time + item combination (prevents exact duplicates)
-                 const exactDuplicateKey = `${ad.username}-${ad.time}-${item_id}`;
-                 const lastExactDuplicate = adContentCache.get(exactDuplicateKey);
-                 if (lastExactDuplicate) {
-                     log(`Skipping exact duplicate: ${ad.username} at ${ad.time} for item ${item_id}`);
-                     continue;
-                 }
+                // Update all caches
+                userDuplicateCache.set(userDuplicateKey, currentTime);
+                adContentCache.set(contentHashKey, currentTime);
+                adContentCache.set(exactDuplicateKey, currentTime);
+                postedAdIds.add(ad.adId);
                 
-                // Prevent duplicate posts (in-memory and DB)
-                if (ad.adId === last_ad_id || postedAdIds.has(ad.adId)) {
-                    log(`Skipping duplicate ad ID: ${ad.adId}`);
-                    continue;
-                }
-                
-                log(`Posting new ad for item ${item_id} from user ${ad.username}`);
-                
-                                 // Update all caches
-                 userDuplicateCache.set(userDuplicateKey, now);
-                 adContentCache.set(contentHashKey, now);
-                 adContentCache.set(exactDuplicateKey, now); // Cache the exact duplicate key
-                 postedAdIds.add(ad.adId);
-                
+                // Get channel
                 const channel = await client.channels.fetch(channel_id).catch(() => null);
-                if (!channel) continue;
-
-                // Take screenshot of the ad (increased time window to catch more ads)
-                let attachment = null;
-                try {
-                                         // Take screenshots for ads under 60 seconds old (match the 1-minute ad validity)
-                     const adTime = parseAdTime(ad.time);
-                     const currentTime = new Date();
-                     const sixtySecondsAgo = new Date(currentTime.getTime() - 60 * 1000);
-                     
-                     if (adTime && adTime > sixtySecondsAgo) {
-                        log(`Taking screenshot for fresh ad (${ad.time})`);
-                        attachment = await getTradeAdScreenshot({ 
-                            username: ad.username, 
-                            time: ad.time, 
-                            adElemIndex: ad.adElemIndex 
-                        }, item_id);
-                        
-                        if (attachment) {
-                            log(`Successfully captured screenshot for ${ad.username}`);
-                        } else {
-                            log(`Screenshot failed for ${ad.username} - will try username fallback`);
-                        }
-                    } else {
-                        log(`Skipping screenshot for older ad (${ad.time}) to maintain cycle speed`);
-                    }
-                } catch (screenshotErr) {
-                    log(`Failed to take screenshot: ${screenshotErr.message}`, 'WARN');
+                if (!channel) {
+                    log(`Could not fetch channel ${channel_id}`, 'ERROR');
+                    continue;
                 }
-
+                
                 // Determine embed color based on value difference
                 let embedColor = 0x2ecc40; // green by default
                 if (ad.valueDiff !== null) {
                     embedColor = ad.valueDiff >= 0 ? 0x2ecc40 : 0xe74c3c;
                 }
-
+                
                 // Build embed with improved formatting
                 const embed = new EmbedBuilder()
                     .setTitle(`Send ${ad.username} a Trade`)
@@ -588,7 +755,7 @@ async function monitorAds(client) {
                 if (attachment) {
                     embed.setImage('attachment://trade_ad.png');
                 }
-
+                
                 // Send to channel
                 const channelMessage = {
                     content: `<@${user_id}> New trade request ad for item ID ${item_id}.`,
@@ -600,7 +767,7 @@ async function monitorAds(client) {
                 }
                 
                 await channel.send(channelMessage);
-
+                
                 // Check if user has DM forwarding enabled and send DM
                 if (row.forward_to_dms) {
                     try {
@@ -619,7 +786,7 @@ async function monitorAds(client) {
                                 )
                                 .setFooter({ text: 'DM Forwarding - @https://discord.gg/M4wjRvywHH' })
                                 .setTimestamp();
-
+                            
                             const dmMessage = {
                                 content: `DM Forwarding: New trade ad for your tracked item ID **${item_id}**`,
                                 embeds: [dmEmbed]
@@ -630,23 +797,43 @@ async function monitorAds(client) {
                             }
                             
                             await user.send(dmMessage);
-                            log(`DM sent to user ${user_id} for item ${item_id}`);
+                            log(`DM sent to user ${user_id} for item ${item_id}`, 'SUCCESS');
                         }
                     } catch (dmError) {
                         log(`Could not send DM to user ${user_id}: ${dmError.message}`, 'ERROR');
-                        // Don't fail the whole process if DM fails
                     }
                 }
                 
+                // Update database
                 await db.query(
                     'UPDATE tracked_items SET last_ad_id = $1 WHERE guild_id = $2 AND channel_id = $3 AND user_id = $4 AND item_id = $5',
                     [ad.adId, guild_id, channel_id, user_id, item_id]
                 );
             }
+            
+            // Log metrics periodically
+            if (screenshotMetrics.attempts > 0 && screenshotMetrics.attempts % 10 === 0) {
+                const successRate = ((screenshotMetrics.successes / screenshotMetrics.attempts) * 100).toFixed(1);
+                log(`Screenshot metrics: ${screenshotMetrics.attempts} attempts, ${screenshotMetrics.successes} successes (${successRate}%), avg time: ${screenshotMetrics.avgTime.toFixed(0)}ms`, 'INFO');
+            }
+            
         } catch (err) {
-            log(`Error in ad monitor: ${err.message}`, 'ERROR');
+            log(`Error in enhanced ad monitor: ${err.message}`, 'ERROR');
         }
-    }, 15000); // 15 seconds - much faster scanning
+    }, 30000); // 30 seconds - quality over speed
+    
+    // Cleanup on process exit
+    process.on('SIGINT', async () => {
+        log('Shutting down enhanced ad monitor...', 'INFO');
+        await cleanupSharedBrowser();
+        process.exit(0);
+    });
+    
+    process.on('SIGTERM', async () => {
+        log('Shutting down enhanced ad monitor...', 'INFO');
+        await cleanupSharedBrowser();
+        process.exit(0);
+    });
 }
 
 module.exports = monitorAds; 
