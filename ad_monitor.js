@@ -148,8 +148,8 @@ function findAdElement(page, targetUsername, targetTime) {
             const usernameElement = ad.querySelector('.ad_creator_name');
             if (!usernameElement) continue;
             
-            const username = usernameElement.textContent.trim();
-            if (username.toLowerCase() !== username.toLowerCase()) continue;
+            const foundUsername = usernameElement.textContent.trim();
+            if (foundUsername.toLowerCase() !== username.toLowerCase()) continue;
             
             // Find time element with multiple fallbacks
             let timeElement = null;
@@ -163,11 +163,11 @@ function findAdElement(page, targetUsername, targetTime) {
             
             for (const selector of timeSelectors) {
                 timeElement = ad.querySelector(selector);
-                if (timeElement && timeElement.textContent.trim()) break;
+                if (timeElement && timeElement.textContent && timeElement.textContent.trim()) break;
             }
             
             // Fallback: search all text content for time
-            if (!timeElement) {
+            if (!timeElement || !timeElement.textContent) {
                 const allText = ad.textContent;
                 const timeMatch = allText.match(/(\d+\s*(?:second|minute|hour)s?\s*ago)/i);
                 if (timeMatch) {
@@ -175,7 +175,7 @@ function findAdElement(page, targetUsername, targetTime) {
                 }
             }
             
-            if (timeElement) {
+            if (timeElement && timeElement.textContent) {
                 const adTime = timeElement.textContent.trim();
                 
                 // Flexible time matching
@@ -227,8 +227,18 @@ async function getTradeAdScreenshotWithRetry(adData, itemId, maxRetries = 3) {
         const adElement = await findAdElement(page, username, time);
         
         // Check if we found a valid element
+        if (!adElement) {
+            log(`No ad element found for ${username} at ${time}`, 'WARN');
+            return null;
+        }
+        
         const elementHandle = await adElement.asElement();
-        if (elementHandle) {
+        if (!elementHandle) {
+            log(`Could not get element handle for ${username} at ${time}`, 'WARN');
+            return null;
+        }
+        
+        try {
             // Scroll element into view and wait for animations
             await elementHandle.scrollIntoView();
             await page.waitForTimeout(1000);
@@ -247,6 +257,9 @@ async function getTradeAdScreenshotWithRetry(adData, itemId, maxRetries = 3) {
             
             log(`Successfully took screenshot for ${username} at ${time} (${duration}ms)`, 'SUCCESS');
             return new AttachmentBuilder(screenshot, { name: 'trade_ad.png' });
+        } catch (screenshotErr) {
+            log(`Screenshot failed for ${username}: ${screenshotErr.message}`, 'ERROR');
+            return null;
         }
         
         log(`Could not find ad element for screenshot - username: ${username}, time: ${time}`, 'WARN');
