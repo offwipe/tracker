@@ -322,4 +322,4 @@ async function monitorAds(client) {
     }, 15000); // Check every 15 seconds
 }
 
-module.exports = { monitorAds };
+module.exports = monitorAds;
