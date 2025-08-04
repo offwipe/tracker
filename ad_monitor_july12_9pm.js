@@ -68,7 +68,7 @@ function parseAd(ad, trackedItemId) {
     // Offered items
     const offeredItems = [];
     ad.find('.offered_items .item_name').each((i, el) => {
-        const itemName = $(el).text().trim();
+        const itemName = ad.find('.offered_items .item_name').eq(i).text().trim();
         if (itemName) {
             offeredItems.push({ name: itemName });
         }
@@ -77,7 +77,7 @@ function parseAd(ad, trackedItemId) {
     // Requested items
     const requestedItems = [];
     ad.find('.requested_items .item_name').each((i, el) => {
-        const itemName = $(el).text().trim();
+        const itemName = ad.find('.requested_items .item_name').eq(i).text().trim();
         if (itemName) {
             requestedItems.push({ name: itemName });
         }
