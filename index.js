@@ -38,7 +38,7 @@ for (const file of eventFiles) {
     }
 }
 
-const monitorAds = require('./ad_monitor');
+const monitorAds = require('./ad_monitor_july12_9pm');
 
 client.once('ready', () => {
     monitorAds(client);
